@@ -187,6 +187,10 @@ def test_fake_quantize_avgpool():
 
     compare_fq_to_int(op, [x_np], True)
 
+    x_np = np.random.randint(-128, 127, size=[1, 3, 224, 224], dtype="int8")
+
+    compare_fq_to_int(op, [x_np], True)
+
 
 def test_fake_quantize_reshape():
     x = relay.var("x", shape=[1, 3, 224, 224], dtype="int8")

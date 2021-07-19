@@ -74,16 +74,115 @@ using AffineTypeMap = Map<Expr, AffineType>;
 using FTVMFakeQuantizationToInteger =
     runtime::TypedPackedFunc<Array<ObjectRef>(const Expr& expr, const AffineTypeMap& map)>;
 
+
+// TODO(amalyshe) move to some header like where dense make is defined
+namespace qnn {
+Expr MakeDequantize(Expr data, Expr input_scale, Expr input_zero_point, int axis);
+}  // namespace qnn
+
+
+class PotentialQExtractor : public ExprVisitor {
+public:
+  const std::set<const CallNode *> GetLatestPotentialQuantized(const Expr &expr) {
+    VisitExpr(expr);
+    for (size_t i = orderVisits_.size(); i > 0; i--) {
+      if (Downcast<Op>(orderVisits_[i - 1].as<CallNode>()->op) != dequantize_op_ &&
+          Downcast<Op>(orderVisits_[i - 1].as<CallNode>()->op) != divide_op_ &&
+          candidates_.find(orderVisits_[i - 1]) == candidates_.end() &&
+          callers_.find(orderVisits_[i - 1]) != callers_.end()) {
+        // going over all args and if all of them are potential quantized - mark
+        // current as quantize and remove args from potential quantized
+        bool callersq = nonquantizable_.find(orderVisits_[i - 1]) == nonquantizable_.end();
+        for (auto c : callers_[orderVisits_[i - 1]]) {
+          if (candidates_.find(c) == candidates_.end()) {
+            callersq = false;
+          }
+        }
+        if (callersq) {
+          candidates_.insert(orderVisits_[i - 1]);
+          for (auto c : callers_[orderVisits_[i - 1]]) {
+            candidates_.erase(c);
+          }
+        }
+      }
+    }
+    std::set<const CallNode *> nodes;
+    for (auto c : candidates_) {
+      nodes.insert(c.as<CallNode>());
+    }
+
+    return nodes;
+  }
+
+  void VisitExpr(const Expr &expr)override {
+    if (expr.as<CallNode>() == nullptr && expr.as<OpNode>() == nullptr &&
+        expr.as<TupleNode>() == nullptr && expr.as<TupleGetItemNode>() == nullptr &&
+        /*expr.as<ConstantNode>() == nullptr &&*/
+        !stack_.empty()) {
+      nonquantizable_.insert(stack_[stack_.size() - 1]);
+      const OpNode *op_node = stack_[stack_.size() - 1].as<CallNode>()->op.as<OpNode>();
+    }
+
+    if (visiteuniq_.find(expr) == visiteuniq_.end()) {
+      visiteuniq_.insert(expr);
+      if (expr.as<CallNode>()) {
+        orderVisits_.push_back(expr);
+        if (!stack_.empty()) {
+          auto it = callers_.find(stack_[stack_.size() - 1]);
+          if (it != callers_.end()) {
+            it->second.push_back(expr);
+          } else {
+            callers_[stack_[stack_.size() - 1]] = { expr };
+          }
+        }
+        stack_.push_back(expr);
+      }
+
+      ExprVisitor::VisitExpr(expr);
+      if (expr.as<CallNode>()) {
+        stack_.pop_back();
+      }
+    } else {
+      ExprVisitor::VisitExpr(expr);
+    }
+  }
+
+protected:
+  void VisitExpr_(const CallNode *call_node)override {
+
+    if (call_node->op == dequantize_op_) {
+      candidates_.insert(stack_[stack_.size() - 1]);
+    }
+    ExprVisitor::VisitExpr_(call_node);
+  }
+
+  const Op dequantize_op_ = Op::Get("qnn.dequantize");
+  // TODO(amalyshe) remove hardcoding of non quantized divide op
+  const Op divide_op_ = Op::Get("divide");
+  std::map<Expr, int> providers_;
+  std::vector<Expr> stack_;
+  std::map<Expr, std::vector<Expr>> callers_;
+  std::set<Expr> candidates_;
+  std::vector<Expr> orderVisits_;
+  std::set<Expr> visiteuniq_;
+  std::set<Expr> nonquantizable_;
+};
+
+
 class SubgraphExtractor : public ExprVisitor {
  public:
   const ExprSet GetSubgraph(const Expr& expr) {
     VisitExpr(expr);
     ExprSet subgraph;
-    if (is_fake_quantized_) {
-      for (auto kv : this->visit_counter_) {
-        if (auto call_node = GetRef<ObjectRef>(kv.first).as<CallNode>()) {
-          if (call_node->op != quantize_op_) {
-            subgraph.insert(Downcast<Expr>(GetRef<ObjectRef>(kv.first)));
+    if (const CallNode *call_node = expr.as<CallNode>()) {
+      if (call_node->op != dequantize_op_) {
+        VisitExpr(expr);
+        if (is_fake_quantized_) {
+          for (auto kv : this->visit_counter_) {
+            if (GetRef<ObjectRef>(kv.first).as<CallNode>() &&
+                Downcast<Expr>(GetRef<ObjectRef>(kv.first)) != expr) {
+              subgraph.insert(Downcast<Expr>(GetRef<ObjectRef>(kv.first)));
+            }
           }
         }
       }
@@ -142,10 +241,7 @@ class SubgraphMutator : public ExprMutator {
     if (subgraph_.size() == 0) {
       return expr;
     }
-    const CallNode* quantize_node = expr.as<CallNode>();
-    ICHECK(quantize_node);
-    ICHECK(quantize_node->op == quantize_op_);
-    out_type_ = affine_types_[expr];
+    ICHECK(expr.as<CallNode>());
     static auto fqfq =
         Op::GetAttrMap<FTVMFakeQuantizationToInteger>("FTVMFakeQuantizationToInteger");
     for (auto node : subgraph_) {
@@ -164,6 +260,9 @@ class SubgraphMutator : public ExprMutator {
 
     static auto fqfq =
         Op::GetAttrMap<FTVMFakeQuantizationToInteger>("FTVMFakeQuantizationToInteger");
+    if (!call_node_) {
+      call_node_ = call_node;
+    }
     Op op = Downcast<Op>(call_node->op);
     if (fqfq.count(op)) {
       Expr expr;
@@ -182,7 +281,14 @@ class SubgraphMutator : public ExprMutator {
           << "got the wrong number of returned arguments from FTVMFakeQuantizationToInteger for "
           << AsText(op, false);
       out = Downcast<Expr>(vals[0]);
-      affine_types_.Set(out, Downcast<AffineType>(vals[1]));
+      out_type_ = Downcast<AffineType>(vals[1]);
+      affine_types_.Set(out, out_type_);
+      if (call_node_ == call_node &&
+          call_node->op != quantize_op_) {
+        const TensorAffineTypeNode *tatn = vals[1].as<TensorAffineTypeNode>();
+        ICHECK(tatn);
+        out = qnn::MakeDequantize(out, tatn->scale, tatn->zero_point, -1);
+      }
     } else {
       ICHECK(false) << "When rewriting a fake quantized graph, found an invalid node "
                     << AsText(GetRef<Expr>(call_node), false);
@@ -214,42 +320,47 @@ class SubgraphMutator : public ExprMutator {
   AffineType out_type_;
   const Op quantize_op_ = Op::Get("qnn.quantize");
   const Op dequantize_op_ = Op::Get("qnn.dequantize");
+  // TODO(amalyshe) remove call_node_  and move adding of dequantize to the MutateSubgraph from VisitExpr_
+  const CallNode *call_node_ = nullptr;
 };
 
 class FakeQuantizationRewriter : public MixedModeMutator {
+ public:
+  FakeQuantizationRewriter(std::set<const CallNode *> nodes) : nodes_(nodes) { }
+
  protected:
   Expr Rewrite_(const CallNode* pre, const Expr& post) override {
-    if (const CallNode* call_node = post.as<CallNode>()) {
-      if (call_node->op == quantize_op_) {
-        SubgraphExtractor extractor;
-        ExprSet subgraph = extractor.GetSubgraph(GetRef<Expr>(pre));
-        AffineTypeMap affine_types = extractor.GetAffineTypes();
+    if (nodes_.find(pre) != nodes_.end()) {
+      SubgraphExtractor extractor;
+      ExprSet subgraph = extractor.GetSubgraph(GetRef<Expr>(pre));
+      AffineTypeMap affine_types = extractor.GetAffineTypes();
 
-        ExprSet post_subgraph;
-        AffineTypeMap post_affine_types;
+      ExprSet post_subgraph;
+      AffineTypeMap post_affine_types;
 
-        for (auto kv : affine_types) {
-          if (pre == kv.first.as<CallNode>()) {
-            // we havent memoized the current op yet
-            post_affine_types.Set(post, kv.second);
-          } else {
-            post_affine_types.Set(memo_.at(kv.first), kv.second);
-          }
+      for (auto kv : affine_types) {
+        if (pre == kv.first.as<CallNode>()) {
+          // we havent memoized the current op yet
+          post_affine_types.Set(post, kv.second);
+        } else {
+          post_affine_types.Set(memo_.at(kv.first), kv.second);
         }
-        for (auto expr : subgraph) {
-          post_subgraph.insert(memo_[expr]);
-        }
-        Expr out = SubgraphMutator(post_subgraph, post_affine_types).MutateSubgraph(post);
-        return out;
       }
+      for (auto expr : subgraph) {
+        post_subgraph.insert(memo_[expr]);
+      }
+      Expr out = SubgraphMutator(post_subgraph, post_affine_types).MutateSubgraph(post);
+      return out;
     }
     return post;
   }
-  const Op quantize_op_ = Op::Get("qnn.quantize");
+  std::set<const CallNode *> nodes_;
 };
 
 Expr FakeQuantizationToInteger(const Expr& expr, const IRModule& mod) {
-  return FakeQuantizationRewriter().Mutate(expr);
+  PotentialQExtractor pqe;
+  std::set<const CallNode *> graph = pqe.GetLatestPotentialQuantized(expr);
+  return FakeQuantizationRewriter(graph).Mutate(expr);
 }
 
 namespace transform {

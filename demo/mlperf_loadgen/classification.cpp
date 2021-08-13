@@ -57,14 +57,34 @@ void Program::ColdRun() {
     } else if (vl) {
         std::cout << 'C' << std::flush;
     }
+    auto input_shape = tvm::ShapeTuple {1, 3, 224, 224};
+    DLDataType dtype{kDLFloat, 32, 1};
 
-    module_inference();
+    auto tmp_input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, runtime->ctx);
+
+    module_inference(tmp_input_tensor);
+}
+
+static int __argMax(tvm::runtime::NDArray &arr) {
+    assert(arr.Shape().size() == 2);
+    assert(arr.Shape()[0] == 1);
+    auto size = arr.Shape()[1];
+    auto data_ptr = static_cast<float*>(arr->data);
+    auto max_val = data_ptr[0];
+    auto max_pos = 0;
+    for (int i = 0; i < size; i++) {
+      if (data_ptr[i] > max_val) {
+        max_val = data_ptr[i];
+        max_pos = i;
+      }
+    }
+    return max_pos;
 }
 
 int Program::InferenceOnce(int img_idx) {
-    benchmark->get_random_image(img_idx);
-    module_inference();
-    return benchmark->get_next_result();
+    auto input = benchmark->get_image(img_idx);
+    auto res = module_inference(input);
+    return __argMax(res);
 }
 
 void Program::UnloadBatch(const std::vector<mlperf::QuerySampleIndex> &img_indices) {
@@ -81,17 +101,12 @@ void Program::UnloadBatch(const std::vector<mlperf::QuerySampleIndex> &img_indic
     benchmark->unload_images(b_size);
 }
 
-
-void Program::module_inference() {
-    runtime->set_input(0, input_tensor);
-    TVMSynchronize(runtime->ctx.device_type, runtime->ctx.device_id, nullptr);
+tvm::runtime::NDArray Program::module_inference(tvm::runtime::NDArray& input) {
+    runtime->set_input_zero_copy(0, input);
     runtime->run();
-    TVMSynchronize(runtime->ctx.device_type, runtime->ctx.device_id, nullptr);
-    tvm::runtime::NDArray tvm_output = runtime->get_output(0);
-    output_tensor.CopyFrom(tvm_output);
-    TVMSynchronize(runtime->ctx.device_type, runtime->ctx.device_id, nullptr);
+    auto res = runtime->get_output(0);
+    return res;
 }
-
 
 SystemUnderTestTVM::SystemUnderTestTVM(Program *_prg) : mlperf::SystemUnderTest() {
     prg = _prg;

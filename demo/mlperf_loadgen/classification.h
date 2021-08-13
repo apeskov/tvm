@@ -19,6 +19,7 @@
 struct RuntimeModule {
     DLDevice ctx{};
     tvm::runtime::PackedFunc set_input;
+    tvm::runtime::PackedFunc set_input_zero_copy;
     tvm::runtime::PackedFunc get_output;
     tvm::runtime::PackedFunc run;
 
@@ -27,6 +28,7 @@ struct RuntimeModule {
         tvm::runtime::Module mod_factory = tvm::runtime::Module::LoadFromFile(module_path);
         tvm::runtime::Module gmod = mod_factory.GetFunction("default")(ctx);
         set_input = gmod.GetFunction("set_input");
+        set_input_zero_copy = gmod.GetFunction("set_input_zero_copy");
         get_output = gmod.GetFunction("get_output");
         run = gmod.GetFunction("run");
     }
@@ -48,7 +50,7 @@ public:
 
     CK::BenchmarkSettings *settings;
 private:
-    void module_inference();
+    tvm::runtime::NDArray module_inference(tvm::runtime::NDArray& input);
 
     CK::BenchmarkSession *session;
     std::unique_ptr<CK::IBenchmark> benchmark;

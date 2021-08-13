@@ -138,16 +138,6 @@ const std::string ArgValueTransform(const std::vector<uint64_t>& value) {
   return s;
 }
 
-const std::string ArgValueTransform(const std::vector<size_t>& value) {
-  std::string s("[");
-  for (auto i : value) {
-    s += std::to_string(i) + ",";
-  }
-  s.resize(s.size() - 1);
-  s += "]";
-  return s;
-}
-
 const std::string ArgValueTransform(
     const std::map<std::string, std::string>& value) {
   std::string s("{");

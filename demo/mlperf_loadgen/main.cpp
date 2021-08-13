@@ -55,15 +55,27 @@ void TestTVM(Program *prg) {
 
     SystemUnderTestTVM sut(prg);
     QuerySampleLibraryTVM qsl(prg);
+
+    size_t num_threads = 8;
+    if (ts.scenario == mlperf::TestScenario::Server && num_threads > 1) {
+      ts.server_num_issue_query_threads = num_threads;
+
+      for (int i = 0; i < num_threads; i++) {
+        auto thr = std::thread([]() { mlperf::RegisterIssueQueryThread(); });
+        thr.detach();
+      }
+    }
+
     mlperf::StartTest(&sut, &qsl, ts, log_settings);
 
-    std::string python_exe = "../../.venv/bin/python3";
-    std::string cmd = python_exe + " " +
-                      prg->settings->project_root + "/accuracy-imagenet.py" + " " +
-                      "--mlperf-accuracy-file " + log_settings.log_output.outdir + "/mlperf_log_accuracy.json" + " " +
-                      "--imagenet-val-file " + prg->settings->project_root + "/val.txt" + " " +
-                      "--dtype float32";
-    system(cmd.c_str());
+    if (ts.mode == mlperf::TestMode::AccuracyOnly) {
+      std::string python_exe = "../../.venv/bin/python3";
+      std::string cmd = python_exe + " " + prg->settings->project_root + "/accuracy-imagenet.py" +
+                        " " + "--mlperf-accuracy-file " + log_settings.log_output.outdir +
+                        "/mlperf_log_accuracy.json" + " " + "--imagenet-val-file " +
+                        prg->settings->project_root + "/val.txt" + " " + "--dtype float32";
+      system(cmd.c_str());
+    }
 }
 
 

@@ -23,9 +23,8 @@ struct RuntimeModule {
     tvm::runtime::PackedFunc get_output;
     tvm::runtime::PackedFunc run;
 
-    explicit RuntimeModule(const std::string& module_path) {
+    explicit RuntimeModule(tvm::runtime::Module& mod_factory) {
         ctx = {kDLCPU, 0};
-        tvm::runtime::Module mod_factory = tvm::runtime::Module::LoadFromFile(module_path);
         tvm::runtime::Module gmod = mod_factory.GetFunction("default")(ctx);
         set_input = gmod.GetFunction("set_input");
         set_input_zero_copy = gmod.GetFunction("set_input_zero_copy");
@@ -54,9 +53,12 @@ private:
 
     CK::BenchmarkSession *session;
     std::unique_ptr<CK::IBenchmark> benchmark;
-    std::unique_ptr<RuntimeModule> runtime;
     tvm::runtime::NDArray input_tensor;
     tvm::runtime::NDArray output_tensor;
+
+    tvm::runtime::Module mod_factory;
+    RuntimeModule& get_runtime();
+    static thread_local RuntimeModule* runtime_;
 };
 
 

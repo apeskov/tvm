@@ -140,7 +140,7 @@ namespace CK {
         virtual void unload_images(size_t num_examples) = 0;
         virtual void save_results() = 0;
         virtual int get_next_result() = 0;
-        virtual void get_random_image(int img_idx) = 0;
+        virtual tvm::runtime::NDArray get_image(int img_idx) = 0;
     };
 
 
@@ -180,8 +180,14 @@ namespace CK {
             }
         }
 
-        void get_random_image(int img_idx) override {
-            _in_converter->convert(_in_batch[ session->idx2loc[img_idx] ].get(), _in_ptr);
+        tvm::runtime::NDArray get_image(int img_idx) override {
+          auto input_shape = tvm::ShapeTuple {1, 3, 224, 224};
+          DLDataType dtype{kDLFloat, 32, 1};
+          auto ctx = DLDevice {kDLCPU, 0};
+          auto tmp_input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, ctx);
+          auto ptr = static_cast<float *>(tmp_input_tensor->data);
+          _in_converter->convert(_in_batch[ session->idx2loc[img_idx] ].get(), ptr);
+          return tmp_input_tensor;
         }
 
         int get_next_result() override {

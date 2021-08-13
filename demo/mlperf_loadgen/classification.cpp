@@ -6,7 +6,7 @@ Program::Program() {
     session = new CK::BenchmarkSession(settings);
 
     std::cout << "\nLoading graph..." << std::endl;
-    runtime = std::make_unique<RuntimeModule>(settings->graph_file());
+    mod_factory = tvm::runtime::Module::LoadFromFile(settings->graph_file());
 
     tvm::ShapeTuple input_shape = settings->do_nchw_reorder
             ? tvm::ShapeTuple({settings->batch_size, settings->num_channels, settings->image_size, settings->image_size})
@@ -17,8 +17,8 @@ Program::Program() {
                             input_shape[3]) << std::endl;
     std::cout << CK::format("Output tensor dimensions: %d*%d", output_shape[0], output_shape[1]) << std::endl;
 
-    input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, runtime->ctx);
-    output_tensor = tvm::runtime::NDArray::Empty(output_shape, dtype, runtime->ctx);
+    input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, get_runtime().ctx);
+    output_tensor = tvm::runtime::NDArray::Empty(output_shape, dtype, get_runtime().ctx);
     benchmark = std::make_unique<CK::Benchmark<float, CK::InNormalize, CK::OutCopy>>(settings,
                                                                                      static_cast<float *>(input_tensor->data),
                                                                                      static_cast<float *>(output_tensor->data));
@@ -60,7 +60,7 @@ void Program::ColdRun() {
     auto input_shape = tvm::ShapeTuple {1, 3, 224, 224};
     DLDataType dtype{kDLFloat, 32, 1};
 
-    auto tmp_input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, runtime->ctx);
+    auto tmp_input_tensor = tvm::runtime::NDArray::Empty(input_shape, dtype, get_runtime().ctx);
 
     module_inference(tmp_input_tensor);
 }
@@ -101,10 +101,20 @@ void Program::UnloadBatch(const std::vector<mlperf::QuerySampleIndex> &img_indic
     benchmark->unload_images(b_size);
 }
 
+thread_local RuntimeModule* Program::runtime_ = nullptr;
+
+RuntimeModule& Program::get_runtime() {
+  if (Program::runtime_ == nullptr) {
+    Program::runtime_ = new RuntimeModule(mod_factory);
+  }
+  return *Program::runtime_;
+}
+
 tvm::runtime::NDArray Program::module_inference(tvm::runtime::NDArray& input) {
-    runtime->set_input_zero_copy(0, input);
-    runtime->run();
-    auto res = runtime->get_output(0);
+    auto runtime = get_runtime();
+    runtime.set_input_zero_copy(0, input);
+    runtime.run();
+    auto res = runtime.get_output(0);
     return res;
 }
 

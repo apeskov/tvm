@@ -57,15 +57,13 @@ void TestTVM(Program *prg) {
     QuerySampleLibraryTVM qsl(prg);
     mlperf::StartTest(&sut, &qsl, ts, log_settings);
 
-    std::string cmd = std::string("python3") + " " +
+    std::string python_exe = "../../.venv/bin/python3";
+    std::string cmd = python_exe + " " +
                       prg->settings->project_root + "/accuracy-imagenet.py" + " " +
                       "--mlperf-accuracy-file " + log_settings.log_output.outdir + "/mlperf_log_accuracy.json" + " " +
                       "--imagenet-val-file " + prg->settings->project_root + "/val.txt" + " " +
                       "--dtype float32";
-
-    std::cout << " To get accuracy use next:" << std::endl
-              << cmd << std::endl;
-//    system(cmd.c_str());
+    system(cmd.c_str());
 }
 
 

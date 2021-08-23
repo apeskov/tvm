@@ -66,7 +66,7 @@ class AsyncLauncherFactoryNode : public ModuleNode {
     get_num_outputs_ = graph_executor_.GetFunction("get_num_outputs");
     get_num_inputs_ = graph_executor_.GetFunction("get_num_inputs");
 
-    // Only classification cases. One input, one output.
+    // TODO(@apeskov): Only classification cases with one input and one output.
     ICHECK(static_cast<int>(get_num_outputs_()) == 1);
     ICHECK(static_cast<int>(get_num_inputs_()) == 1);
 
@@ -86,6 +86,7 @@ class AsyncLauncherFactoryNode : public ModuleNode {
     auto cur_batch = input.Shape()[0];
     auto num_chunk = (cur_batch - 1) / model_batch_ + 1;
 
+    // prepare output tensor stub. While we have no set_zerocopy_output
     std::vector<ShapeTuple::index_type> output_shape {output_shape_.begin(), output_shape_.end()};
     output_shape[0] = cur_batch;
     NDArray output = NDArray::Empty(output_shape, input.DataType(), dev_);

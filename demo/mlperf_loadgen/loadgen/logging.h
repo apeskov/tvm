@@ -182,6 +182,20 @@ class ChromeTracer {
     *out_ << "}},\n";
   }
 
+  template <typename... Args>
+  void AddEvent(const std::string& name, uint64_t pid, uint64_t tid,
+                PerfClock::time_point time, const Args... args) {
+    *out_ << "{\"name\":\"" << name << "\","
+          << "\"ph\":\"i\","
+          << "\"pid\":" << pid << ","
+          << "\"tid\":" << tid << ","
+          << "\"ts\":" << Micros(time - origin_).count() << ","
+          << "\"s\":\"p\","
+          << "\"args\":{ ";
+    AddArgs(args...);
+    *out_ << "}},\n";
+  }
+
   void Flush() { out_->flush(); }
 
  private:
@@ -310,6 +324,16 @@ class AsyncLog {
       tracer_->AddCounterEvent(trace_name, current_pid_, time, args...);
     }
   }
+
+  template <typename... Args>
+  void TraceEvent(const std::string& trace_name,
+                  PerfClock::time_point time, const Args... args) {
+    std::unique_lock<std::mutex> lock(trace_mutex_);
+    if (tracer_) {
+      tracer_->AddEvent(trace_name, current_pid_, current_tid_, time, args...);
+    }
+  }
+
 
   void RestartLatencyRecording(uint64_t first_sample_sequence_id,
                                size_t latencies_to_reserve);

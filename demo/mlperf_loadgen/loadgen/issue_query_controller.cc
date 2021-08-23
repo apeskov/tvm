@@ -237,6 +237,10 @@ struct QueryScheduler<TestScenario::Server> {
     auto scheduled_time = start + next_query->scheduled_delta;
     next_query->scheduled_time = scheduled_time;
 
+    Log([scheduled_time](AsyncLog& log) {
+      log.TraceEvent("ScheduleTS", scheduled_time);
+    });
+
     auto now = PerfClock::now();
     if (now < scheduled_time) {
       std::this_thread::sleep_until(scheduled_time);

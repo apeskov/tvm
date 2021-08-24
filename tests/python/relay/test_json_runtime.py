@@ -935,6 +935,55 @@ def test_qnn_dense():
         check_result(mod, ref_mod, {"in": data_i}, (1, OC),
                      tol=1e-10, atol=1, dtype="uint8")
 
+def test_qnn_batch_matmul():
+    """
+    :return:
+    """
+
+    for h, w in (
+            (16, 6),
+            (64, 32),
+            (17, 23),
+    ):
+        dtype = "float32"
+        NB = 1
+        IC = 7
+        d_shape = (IC, h, w)
+        w_shape = (IC, h, w)
+        b_shape = (h,)
+        if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+            print("skip because DNNL codegen is not available")
+            return
+
+        data_i = np.random.uniform(0, 30, d_shape).astype("int8")
+        data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+        data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+        data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+
+        in_d = relay.var("in", shape=d_shape, dtype="int8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype="int32")
+        in_d_zp = relay.const(0, dtype="int32")
+        in_d_sc = relay.const(0.1, dtype=dtype)
+        in_w_zp = relay.const(0, dtype="int32")
+        in_w_sc = relay.const(0.12, dtype=dtype)
+
+        rq_in_zp = relay.const(0.0, dtype="int32")
+        rq_in_sc = relay.const(0.02, dtype=dtype)
+        rq_out_zp = relay.const(0, dtype="int32")
+        rq_out_sc = relay.const(0.1, dtype=dtype)
+
+        op = tvm.relay.qnn.op.batch_matmul(in_d, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                    out_dtype="int32")
+
+        func = relay.Function([in_d], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+        mod = partition_for_dnnl(ref_mod)
+        assert not tvm.ir.structural_equal(ref_mod, mod)
+        # # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in": data_i}, (IC, h, h),
+                      tol=1e-10, atol=0, dtype="int32")
 
 if __name__ == "__main__":
     test_conv2d()
@@ -949,3 +998,5 @@ if __name__ == "__main__":
     test_qnn_conv2d()
     test_qnn_conv2d_sum()
     test_qnn_dense()
+    test_qnn_batch_matmul()
+

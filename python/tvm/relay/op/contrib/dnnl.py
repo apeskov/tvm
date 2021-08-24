@@ -92,7 +92,7 @@ _register_external_op_helper("nn.relu")
 # _register_external_op_helper("add")
 _register_external_op_helper("subtract")
 _register_external_op_helper("multiply")
-
+_register_external_op_helper("qnn.batch_matmul")
 
 def make_pattern(with_bias=True):
     data = wildcard()
@@ -158,3 +158,9 @@ def pattern_table():
                      dense_qnn_pat,
                      ]
     return dnnl_patterns
+
+def make_pattern_qnn_batch_matmul():
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("nn.batch_matmul")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    return pat

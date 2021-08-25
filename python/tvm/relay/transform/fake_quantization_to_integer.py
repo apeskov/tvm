@@ -147,7 +147,9 @@ def batch_matmul(expr, type_map):
     y_t = type_map[y]
     matmul_scale = fold_constant(x_t.scale * y_t.scale)
     matmul_zp = relay.const(0)
-    out = relay.qnn.op.batch_matmul(x, y, x_t.zero_point, y_t.zero_point, x_t.scale, y_t.scale)
+    out = relay.qnn.op.batch_matmul(
+        x, y, x_t.zero_point, y_t.zero_point, x_t.scale, y_t.scale
+    )
     return [out, TensorAffineType(matmul_scale, matmul_zp, out.attrs.out_dtype)]
 
 
@@ -233,7 +235,6 @@ def pad(expr, type_map):
                 out_dtype=t.dtype,
             )
     else:
-        ## If the pad-value is a constant, we need to quantize it
         assert isinstance(pad_value, relay.expr.Constant)
         pad_value = relay.qnn.op.quantize(pad_value, t.scale, t.zero_point)
 

@@ -97,8 +97,13 @@ class AnchorQuantExtractor : public ExprVisitor {
     // subgraphs are dequantize ops
     for (size_t i = orderVisits_.size(); i > 0; i--) {
       auto iexpr = orderVisits_[i - 1];
-      if (Downcast<Op>(iexpr.as<CallNode>()->op) != dequantize_op_ &&
-          candidates_.find(iexpr) == candidates_.end() && callers_.find(iexpr) != callers_.end()) {
+      auto callNode = iexpr.as<CallNode>();
+      // shtinsa: Check for GlobalVarNode required to avoid crash if 
+      // FakeQuantize2Integer is called ahead of DNNL back-end assiging.
+      if (callNode != nullptr &&
++       (callNode->op->IsInstance<GlobalVarNode>() ||
+        Downcast<Op>(iexpr.as<CallNode>()->op) != dequantize_op_) &&
+        candidates_.find(iexpr) == candidates_.end() && callers_.find(iexpr) != callers_.end()) {
         // going over all args and if all of them are potential quantized - mark
         // current as quantize and remove args from potential quantized
         bool callersq = nonquantizable_.find(iexpr) == nonquantizable_.end();
@@ -129,9 +134,14 @@ class AnchorQuantExtractor : public ExprVisitor {
   void VisitExpr(const Expr& expr) override {
     if (expr.as<CallNode>() == nullptr && expr.as<OpNode>() == nullptr &&
         expr.as<TupleNode>() == nullptr && expr.as<TupleGetItemNode>() == nullptr &&
-        expr.as<ConstantNode>() == nullptr && !stack_.empty() &&
-        Downcast<Op>(stack_[stack_.size() - 1].as<CallNode>()->op) != quantize_op_) {
-      nonquantizable_.insert(stack_[stack_.size() - 1]);
+        expr.as<ConstantNode>() == nullptr && !stack_.empty()) {
+      auto lastVal = stack_[stack_.size() - 1].as<CallNode>();
+      // shtinsa: Check for GlobalVarNode required to avoid crash if 
+      // FakeQuantize2Integer is called ahead of DNNL back-end assiging.
+      if (lastVal->op->IsInstance<GlobalVarNode>() ||
+        Downcast<Op>(lastVal->op) != quantize_op_) {
+        nonquantizable_.insert(stack_[stack_.size() - 1]);
+      }
     }
 
     if (visiteuniq_.find(expr) == visiteuniq_.end()) {
@@ -265,9 +275,11 @@ class SubgraphMutator : public ExprMutator {
     Expr mutated = Mutate(expr);
     // no requantize op at the end of modified subgraph is a reason to add dequantize op
     if (Downcast<Op>(expr.as<CallNode>()->op) != quantize_op_) {
-      const TensorAffineTypeNode* outta = affine_types_[mutated].as<TensorAffineTypeNode>();
-      ICHECK(outta);
-      mutated = qnn::MakeDequantize(mutated, outta->scale, outta->zero_point, -1);
+      if (affine_types_.find(mutated) != affine_types_.end()) {
+        const TensorAffineTypeNode* outta = affine_types_[mutated].as<TensorAffineTypeNode>();
+        ICHECK(outta);
+        mutated = qnn::MakeDequantize(mutated, outta->scale, outta->zero_point, -1);
+      }
     }
     return mutated;
   }
@@ -376,8 +388,9 @@ class FakeQuantizationRewriter : public MixedModeMutator {
 };
 
 Expr FakeQuantizationToInteger(const Expr& expr, const IRModule& mod) {
-  auto anchor_nodes = AnchorQuantExtractor().GetLatestPotentialQuantized(expr);
-  return FakeQuantizationRewriter(anchor_nodes).Mutate(expr);
+  AnchorQuantExtractor pqe;
+  std::set<const CallNode *> graph = pqe.GetLatestPotentialQuantized(expr);
+  return FakeQuantizationRewriter(graph).Mutate(expr);
 }
 
 namespace transform {

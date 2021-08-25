@@ -255,7 +255,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           QnnConv2d(nid);
         } else if ("dnnl.qnn.conv2d_sum" == op_name) {
           QnnConv2dSum(nid);
-        } else if ("dnnl.qnn.dense" == op_name) {
+        } else if ("dnnl.qnn.dense" == op_name || "qnn.dense" == op_name) {
           QnnDense(nid);
         } else if ("nn.dense" == op_name) {
           Dense(nid);

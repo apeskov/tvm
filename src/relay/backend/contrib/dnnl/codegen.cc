@@ -448,23 +448,23 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
         call = GetRootCall(fn->body.as<CallNode>(), 2, {"nn.conv2d", "add", "nn.relu"});
       } else if (name == "dnnl.conv2d_relu") {
         call = GetRootCall(fn->body.as<CallNode>(), 1, {"nn.conv2d", "nn.relu"});
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
       } else if (name == "dnnl.qnn.dense") {
         call = GetRootCall(fn->body.as<CallNode>(), 4,
             {"qnn.dense", "add", "qnn.requantize", "clip", "cast"});
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
       } else if (name == "dnnl.qnn.conv2d") {
         call = GetRootCall(fn->body.as<CallNode>(), 4,
             {"qnn.conv2d", "add", "qnn.requantize", "clip", "cast"});
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
       } else if (name == "dnnl.qnn.conv2d_sum") {
         call = GetRootCall(fn->body.as<CallNode>(), 6,
                            {"qnn.conv2d", "add", "qnn.requantize", "clip",
                             "cast", "qnn.add", "clip"});
-        ICHECK(call->op.as<OpNode>()) << "Not op node";
+      } else if ("dnnl.qnn.batch_matmul_dequantize" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 2,
+                           {"qnn.batch_matmul", "reshape", "qnn.dequantize"});
       } else {
-        LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
+          LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
       }
+      ICHECK(call->op.as<OpNode>()) << "Not op node";
     } else {
       LOG(FATAL) << "DNNL JSON runtime does not support calls to " << cn->op->GetTypeKey();
     }

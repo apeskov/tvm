@@ -93,7 +93,7 @@ _register_external_op_helper("nn.relu")
 # _register_external_op_helper("subtract")
 # _register_external_op_helper("multiply")
 _register_external_op_helper("qnn.batch_matmul")
-#_register_external_op_helper("qnn.dense")
+_register_external_op_helper("qnn.dense")
 
 def make_pattern(with_bias=True):
     data = wildcard()
@@ -144,6 +144,19 @@ def make_pattern_qnn_dense(with_sum=False):
 
     return pat
 
+def make_pattern_qnn_batch_matmul():
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("nn.batch_matmul")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    return pat
+
+def make_pattern_qnn_batch_matmul_reshape_dequantize():
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("qnn.batch_matmul")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
+    return pat
 
 @register_pattern_table("dnnl")
 def pattern_table():
@@ -152,16 +165,15 @@ def pattern_table():
     conv2d_qnn_sum_pat = ("dnnl.qnn.conv2d_sum", make_pattern_qnn_conv2d(with_sum=True))
     conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
     dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
+    batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
+    # batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
     dnnl_patterns = [conv2d_bias_relu_pat,
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
                      dense_qnn_pat,
-                     ]
+                     batch_matmul_pat,
+                    #  batch_matmul_reshape_dequantize_pat
+                    ]
     return dnnl_patterns
 
-def make_pattern_qnn_batch_matmul():
-    pat = wildcard()
-    weight = wildcard()
-    pat = is_op("nn.batch_matmul")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
-    return pat

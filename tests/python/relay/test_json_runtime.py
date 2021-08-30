@@ -66,6 +66,7 @@ def check_result(
         out = tvm.nd.empty(out_shape, device=device, dtype=dtype)
         out = rt_mod.get_output(0, out)
         ref_result = out.numpy()
+        print("ref result: ", ref_result)
         np.set_printoptions(threshold=np.inf)
 
     def check_vm_result():
@@ -76,6 +77,7 @@ def check_result(
         exe = runtime.vm.Executable.load_exec(code, lib)
         vm = runtime.vm.VirtualMachine(exe, device)
         out = vm.run(**map_inputs)
+        print("opt result: ", out.numpy())
         tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=atol)
 
     def check_graph_executor_result():
@@ -1028,8 +1030,11 @@ def test_qnn_dense_s8s8s32():
         ref_mod = tvm.IRModule.from_expr(func)
         ref_mod = relay.transform.InferType()(ref_mod)
         mod = partition_for_dnnl(ref_mod)
-        assert not tvm.ir.structural_equal(ref_mod, mod)
+        print(ref_mod)
+        print("------------------------")
         print(mod)
+        assert not tvm.ir.structural_equal(ref_mod, mod)
+        
         # # atol=1 means int values should match with +-1 tolerance
         check_result(mod, ref_mod, {"in": data_i}, (h, h),
                       tol=1e-10, atol=0, dtype="int32")
@@ -1040,13 +1045,13 @@ def test_qnn_batch_matmul_reshape_dequantize():
     """
 
     for h, w in (
-            (16, 32),
+            (4, 8),
             # (64, 32),
             # (17, 23),
     ):
         dtype = "float32"
         NB = 1
-        IC = 8
+        IC = 2
         d_shape = (IC, h, w)
         w_shape = (IC, h, w)
         if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
@@ -1077,7 +1082,9 @@ def test_qnn_batch_matmul_reshape_dequantize():
         ref_mod = tvm.IRModule.from_expr(func)
         ref_mod = relay.transform.InferType()(ref_mod)
         mod = partition_for_dnnl(ref_mod)
-
+        print(ref_mod)
+        print("----------------------")
+        print(mod)
         assert not tvm.ir.structural_equal(ref_mod, mod)
         # # atol=1 means int values should match with +-1 tolerance
         check_result(mod, ref_mod, {"in": data_i}, (1, IC, h, h),
@@ -1097,6 +1104,6 @@ if __name__ == "__main__":
 #     test_qnn_conv2d_sum()
     # test_qnn_dense()
     # test_qnn_batch_matmul()
-    #test_qnn_batch_matmul_reshape_dequantize()
-    test_qnn_dense_s8s8s32()
+    test_qnn_batch_matmul_reshape_dequantize()
+#    test_qnn_dense_s8s8s32()
 

@@ -1,5 +1,5 @@
 #include "classification.h"
-
+#include <cassert>
 
 Program::Program() {
     settings = new CK::BenchmarkSettings();
@@ -124,6 +124,8 @@ SystemUnderTestTVM::SystemUnderTestTVM(Program *_prg) : mlperf::SystemUnderTest(
 };
 
 void SystemUnderTestTVM::IssueQuery(const std::vector<mlperf::QuerySample> &samples) {
+    using Time = std::chrono::high_resolution_clock;
+    auto start = Time::now();
 
     ++query_counter;
     auto vl = prg->settings->verbosity_level;
@@ -140,6 +142,7 @@ void SystemUnderTestTVM::IssueQuery(const std::vector<mlperf::QuerySample> &samp
     int i = 0;
     for (auto s : samples) {
         int predicted_class = prg->InferenceOnce(s.index);
+        // int predicted_class = 0;
 
         if (vl > 1) {
             std::cout << "Query image index: " << s.index << " -> Predicted class: " << predicted_class << std::endl
@@ -153,6 +156,9 @@ void SystemUnderTestTVM::IssueQuery(const std::vector<mlperf::QuerySample> &samp
         ++i;
     }
     mlperf::QuerySamplesComplete(responses.data(), responses.size());
+    auto dur = Time::now() - start;
+    auto dur_ms = std::chrono::duration_cast<std::chrono::microseconds>(dur).count();
+    // std::cout << "[XXX] " << dur_ms << " ms" << std::endl;
 }
 
 void SystemUnderTestTVM::FlushQueries() {

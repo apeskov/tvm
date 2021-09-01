@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import multiprocessing
 import threading
@@ -111,7 +112,7 @@ def run_within_arenas(init_f, action_f, args, *, arena_size=1, arena_num=None,
 
     latency = total_duration * 1000
     throughput = benchmark_time_sec * 1000 / total_count
-    print(f"Arena SZ:{arena_size}, NUM:{arena_num}, L:{latency:.2f}, THRP:{throughput:.2f}")
+    print(f"Arena_SZ; {arena_size}; NUM;{arena_num}; L;{latency:.2f}; THRP;{throughput:.2f}")
 
     time.sleep(chillout_time_sec)
     return latency, throughput
@@ -252,29 +253,42 @@ def print_to_csv(file_path, res):
 
 
 def main():
-    # module_path = "__prebuilt/dnnl_int8_resnet50.so"
-    module_path = "__prebuilt/dnnl_int8_resnet50.dylib"
-    img_path = "__data/cat3.png"
+    module_path = sys.argv[1]
+    img_path = sys.argv[2]
 
-    benchmark_time_sec = 5
+    benchmark_time_sec = 10
     chill_out_time_sec = 1
 
     num_cores = multiprocessing.cpu_count()
 
-    latency_mod_res = []
+    
     throughput_mod_res = []
     scalability_mod_res = []
 
     # Latency mode evaluation. Single subprocess.
-    # print("=== Latency mode ===")
-    # for arena_size in range(1, num_cores + 1):
-    #     res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
-    #                             arena_size=arena_size, arena_num=1,
-    #                             benchmark_time_sec=benchmark_time_sec,
-    #                             chillout_time_sec=chill_out_time_sec
-    #                             )
-    #     latency_mod_res.append((arena_size, res))
-    # print_to_csv("latency.csv", latency_mod_res)
+    print("=== Latency all worker ===")
+    latency_all_res = []
+    for arena_size in range(1, num_cores + 1):
+        res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
+                                arena_size=arena_size, arena_num=int(num_cores / arena_size),
+                                benchmark_time_sec=benchmark_time_sec,
+                                chillout_time_sec=chill_out_time_sec
+                                )
+        latency_all_res.append((arena_size, res))
+    print_to_csv("latency_all.csv", latency_all_res)
+
+
+    print("=== Latency one worker ===")
+    latency_one_res = []
+    for arena_num in range(1, num_cores + 1):
+        res = run_within_arenas(init_f=load_module, action_f=run_module, args=(module_path, img_path),
+                                arena_size=1, arena_num=arena_num,
+                                benchmark_time_sec=benchmark_time_sec,
+                                chillout_time_sec=chill_out_time_sec
+                                )
+        latency_one_res.append((arena_num, res))
+    print_to_csv("latency_one.csv", latency_one_res)
+
 
     # # Throughput mode evaluation. Several subprocess with equal num of internal threads(arena_size).
     # # Lets limit it by 30 because single Resnet50 cannot utilize more cores.
@@ -308,15 +322,15 @@ def main():
     #     scalability_mod_res.append((arena_num, res))
     # print_to_csv("scalability_gil.csv", scalability_mod_res)
 
-    print("=== Scalability mode. Like MLPerf ===")
-    for arena_num in range(1, num_cores + 1):
-        res = run_like_mlperf(model_path=module_path, img_path=img_path,
-                              arena_size=1, arena_num=arena_num,
-                              benchmark_time_sec=benchmark_time_sec,
-                              chillout_time_sec=chill_out_time_sec
-                              )
-        scalability_mod_res.append((arena_num, res))
-    print_to_csv("scalability_gil.csv", scalability_mod_res)
+    # print("=== Scalability mode. Like MLPerf ===")
+    # for arena_num in range(1, num_cores + 1):
+    #     res = run_like_mlperf(model_path=module_path, img_path=img_path,
+    #                           arena_size=1, arena_num=arena_num,
+    #                           benchmark_time_sec=benchmark_time_sec,
+    #                           chillout_time_sec=chill_out_time_sec
+    #                           )
+    #     scalability_mod_res.append((arena_num, res))
+    # print_to_csv("scalability_gil.csv", scalability_mod_res)
 
 
 if __name__ == "__main__":

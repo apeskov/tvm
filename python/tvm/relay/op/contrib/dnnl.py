@@ -92,8 +92,8 @@ _register_external_op_helper("nn.relu")
 # _register_external_op_helper("add")
 # _register_external_op_helper("subtract")
 # _register_external_op_helper("multiply")
-# _register_external_op_helper("qnn.batch_matmul")
-# _register_external_op_helper("qnn.dense")
+_register_external_op_helper("qnn.batch_matmul")
+_register_external_op_helper("qnn.dense")
 
 def make_pattern(with_bias=True):
     data = wildcard()
@@ -158,6 +158,29 @@ def make_pattern_qnn_batch_matmul_reshape_dequantize():
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
     return pat
 
+def make_pattern_qnn_dense_reshape_dequantize():
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
+    return pat
+#  %140 = add(%138, %139);
+#   %141 = divide(%140, 1.41421f);
+#   %142 = erf(%141);
+#   %143 = multiply(%140, 0.5f);
+#   %144 = add(%142, 1f);
+#   %145 = multiply(%143, %144);
+
+def make_pattern_gelu():
+    inpt = wildcard()
+    div = is_op("divide")(inpt, is_constant())
+    pat = is_op("erf")(div)
+    mul = is_op("multiply")(inpt, is_constant())
+    pat = is_op("add")(pat, is_constant())
+    pat = is_op("multiply")(mul, pat)
+    return pat
+
 @register_pattern_table("dnnl")
 def pattern_table():
     conv2d_bias_relu_pat = ("dnnl.conv2d_bias_relu", make_pattern(with_bias=True))
@@ -166,14 +189,18 @@ def pattern_table():
     conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
     dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
     batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
-    batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
+    # batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
+    # dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
+    gelu_pat = ("dnnl.qnn.gelu", make_pattern_gelu())
     dnnl_patterns = [conv2d_bias_relu_pat,
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
                      dense_qnn_pat,
                      batch_matmul_pat,
-                     batch_matmul_reshape_dequantize_pat
+                     gelu_pat
+                    #  batch_matmul_reshape_dequantize_pat,
+                    #  dense_reshape_dequantize_pat
                     ]
     return dnnl_patterns
 

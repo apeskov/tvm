@@ -461,6 +461,11 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
       } else if ("dnnl.qnn.batch_matmul_dequantize" == name){
         call = GetRootCall(fn->body.as<CallNode>(), 2,
                            {"qnn.batch_matmul", "reshape", "qnn.dequantize"});
+      } else if ("dnnl.qnn.dense_dequantize" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 2,
+                           {"qnn.dense", "reshape", "qnn.dequantize"});
+      } else if ("dnnl.qnn.gelu" == name){
+        call = fn->body.as<CallNode>();
       } else {
           LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
       }

@@ -271,6 +271,11 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           BatchMatMulDequantize(nid);
         } else if ("qnn.dense" == op_name) {
           Denses8s8s32(nid);
+        } else if ("dnnl.qnn.dense_dequantize" == op_name){
+          DenseMulDequantize(nid);
+        }
+         else if ("dnnl.qnn.gelu" == op_name){
+          GELU(nid);
         }
         else {
           LOG(FATAL) << "Unsupported op: " << op_name;
@@ -1358,7 +1363,7 @@ std::tuple<
     // Matmul description.
     dnnl::primitive_attr attr;
     attr.set_output_scales(0, {src_scale_val});
-    attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
+    // attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
     attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
 
     auto matmul_desc      = dnnl::matmul::desc(data_md, weight_md, dst_md);
@@ -1375,6 +1380,117 @@ std::tuple<
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                          {DNNL_ARG_WEIGHTS, weight_memory},
                          {DNNL_ARG_DST, dst_memory}});
+  }
+
+void DenseMulDequantize(const size_t& nid) {
+    // Setup attributes.
+    auto node = nodes_[nid];
+    ICHECK_EQ(node.GetInputs().size(), 8);
+
+    auto out_shape = node.GetOpShape();
+    ICHECK_EQ(out_shape.size(), 1);
+    ICHECK((out_shape[0].size() == 2) || ((out_shape[0].size() == 3 && out_shape[0][0] == 1)));
+    auto data_entry     = node.GetInputs()[0];
+    auto weight_entry   = node.GetInputs()[1];
+    auto src_zero_point = node.GetInputs()[2];
+    auto dst_zero_point = node.GetInputs()[3];
+
+    auto src_scale      = node.GetInputs()[4];
+    auto dst_scale      = node.GetInputs()[5];
+
+    float   src_scale_val      = get_value<float>(src_scale);
+    int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
+
+    float   dst_scale_val      = get_value<float>(dst_scale);
+    int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
+
+    dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
+    dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
+
+    ICHECK_EQ(input_shape.size(), 2) << "input shape should have 2 dimentions.";
+    ICHECK_EQ(weight_shape.size(), 2) << "weights shape should have 2 dimentions.";
+    ICHECK_EQ(nodes_[data_entry.id_].GetOpDataType()[data_entry.index_].bits, 8);
+    ICHECK_EQ(nodes_[weight_entry.id_].GetOpDataType()[weight_entry.index_].bits, 8);
+    dnnl::memory::dims data_dims   = {input_shape[0], input_shape[1]};
+    dnnl::memory::dims weight_dims = {weight_shape[0], weight_shape[1]};
+    dnnl::memory::dims out_dims;
+    if (out_shape[0].size() == 3) {
+      out_dims = {out_shape[0][1], out_shape[0][2]};
+    } else {
+      out_dims = {out_shape[0][0], out_shape[0][1]};
+    }
+    auto data_md   = dnnl::memory::desc({data_dims, dt::s8, tag::nc});
+    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8, tag::nc});
+    auto dst_md    = dnnl::memory::desc({out_dims, dt::f32, tag::nc});
+
+    dnnl::primitive_attr attr;
+    // attr.set_output_scales(0, {dst_scale_val});
+    // attr.set_scales(DNNL_ARG_SRC_0, 0, {src_scale_val});
+    // std::cout << "src_scale_val " << src_scale_val << std::endl;
+    // std::cout << "dst_scale_val " << dst_scale_val << std::endl;
+    attr.set_output_scales(0, {dst_scale_val});
+    attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
+    attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
+
+    auto dense_desc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_inference, data_md,
+                                                        weight_md, dst_md);
+    auto dense_prim_desc = dnnl::inner_product_forward::primitive_desc(dense_desc, attr, engine_);
+
+    auto dense = dnnl::inner_product_forward(dense_prim_desc);
+    net_.push_back(dense);
+
+    // // Memory mappings.
+    auto data_memory   = BindDNNLMemory(data_entry, data_md);
+    auto weight_memory = BindDNNLMemory(weight_entry, weight_md);
+    JSONGraphNodeEntry out_entry(nid, 0);
+    auto dst_memory = BindDNNLMemory(out_entry, dst_md);
+
+    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                         {DNNL_ARG_WEIGHTS, weight_memory},
+                         {DNNL_ARG_DST, dst_memory}});
+  }
+
+void GELU(const size_t& nid) {
+    // Setup attributes.
+    const std::unordered_map<size_t, dnnl::memory::format_tag> shape2Tag = {
+      {2, tag::ab},
+      {3, tag::abc},
+      {4, tag::abcd},
+      {5, tag::abcde},
+    };
+    auto node = nodes_[nid];
+
+    ICHECK_EQ(node.GetInputs().size(), 1);
+
+    auto out_shape = node.GetOpShape();
+    ICHECK_EQ(out_shape.size(), 1);
+    auto data_entry     = node.GetInputs()[0];
+
+    dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
+
+    dnnl::memory::dims data_dims = input_shape;
+    dnnl::memory::dims out_dims  = out_shape[0];
+    auto it = shape2Tag.find(data_dims.size());
+    ICHECK(it != shape2Tag.end()) << "input shape should has invalid dimention.";
+    auto data_md   = dnnl::memory::desc({data_dims, dt::f32, it->second});
+    it = shape2Tag.find(data_dims.size());
+    ICHECK(it != shape2Tag.end()) << "output shape should has invalid dimention.";
+    auto dst_md    = dnnl::memory::desc({out_dims, dt::f32, it->second});
+
+    auto eltwise_desc = dnnl::eltwise_forward::desc(dnnl::prop_kind::forward_training,
+                dnnl::algorithm::eltwise_gelu_erf, data_md);
+    auto eltwise_prim_desc = dnnl::eltwise_forward::primitive_desc(eltwise_desc, engine_);
+
+    auto gelu = dnnl::eltwise_forward(eltwise_prim_desc);
+    net_.push_back(gelu);
+
+    // // // Memory mappings.
+    auto data_memory   = BindDNNLMemory(data_entry, data_md);
+    JSONGraphNodeEntry out_entry(nid, 0);
+    auto dst_memory = BindDNNLMemory(out_entry, dst_md);
+
+    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                          {DNNL_ARG_DST, dst_memory}});
   }
 
   // Read from DNNL memory (+offset) and write to the handle.

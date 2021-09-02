@@ -121,11 +121,11 @@ const std::string ArgValueTransform(const LogBinaryAsHexString& value) {
 
 #if USE_NEW_LOGGING_FORMAT
 const std::string ArgValueTransform(const std::string& value) {
-  return std::string("\"") + value + std::string("\"");
+  return value;
 }
 
 const std::string ArgValueTransform(const char* value) {
-  return std::string("\"") + std::string(value) + std::string("\"");
+  return std::string(value);
 }
 
 const std::string ArgValueTransform(const std::vector<uint64_t>& value) {

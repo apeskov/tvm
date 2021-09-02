@@ -12,24 +12,43 @@
 #include "query_sample_library.h"
 #include "system_under_test.h"
 
+#include "concurrent_queue.h"
 #include "test_settings.h"
 #include "benchmark.h"
 
 
 struct RuntimeModule {
-    DLDevice ctx{};
-    tvm::runtime::PackedFunc set_input;
-    tvm::runtime::PackedFunc set_input_zero_copy;
-    tvm::runtime::PackedFunc get_output;
-    tvm::runtime::PackedFunc run;
+    tvm::runtime::PackedFunc set_input_zero_copy{};
+    tvm::runtime::PackedFunc get_output{};
+    tvm::runtime::PackedFunc run{};
 
-    explicit RuntimeModule(tvm::runtime::Module& mod_factory) {
-        ctx = {kDLCPU, 0};
+    RuntimeModule() = default;
+
+    RuntimeModule(tvm::runtime::Module& mod_factory, const DLDevice& ctx) {
         tvm::runtime::Module gmod = mod_factory.GetFunction("default")(ctx);
-        set_input = gmod.GetFunction("set_input");
         set_input_zero_copy = gmod.GetFunction("set_input_zero_copy");
         get_output = gmod.GetFunction("get_output");
         run = gmod.GetFunction("run");
+    }
+};
+
+
+struct WorkerData {
+    DLDevice device;
+    RuntimeModule runtime;
+    std::unique_ptr<CK::IBenchmark> benchmark;
+
+    void init_device(const DLDevice& device_) {
+        device = device_;
+    }
+
+    void init_runtime(tvm::runtime::Module& mod_factory) {
+        runtime = RuntimeModule(mod_factory, device);
+    }
+
+    void init_benchmark(const CK::BenchmarkSettings* settings) {
+        benchmark = std::make_unique<CK::Benchmark>(settings);
+        benchmark->has_background_class = settings->num_classes == 1001;
     }
 };
 
@@ -40,31 +59,31 @@ public:
     ~Program();
 
     void LoadNextBatch(const std::vector<mlperf::QuerySampleIndex>& img_indices);
-    void ColdRun();
-    int InferenceOnce(int img_idx);
     void UnloadBatch(const std::vector<mlperf::QuerySampleIndex>& img_indices);
+    int available_images_max() const { return get_settings()->list_of_available_imagefiles().size(); }
+    int images_in_memory_max() const { return get_settings()->images_in_memory_max; }
+    const CK::BenchmarkSettings* get_settings() const { return settings; }
 
-    int available_images_max() const { return settings->list_of_available_imagefiles().size(); }
-    int images_in_memory_max() const { return settings->images_in_memory_max; }
-
-    CK::BenchmarkSettings *settings;
+    static Queue<std::vector<mlperf::QuerySample>> samples_queue;
+    static CK::DataHandler<tvm::runtime::NDArray> data_handler;
 private:
-    tvm::runtime::NDArray module_inference(tvm::runtime::NDArray& input);
+    static int inference(int img_idx, WorkerData* worker_data);
+    static bool query_response(WorkerData* worker_data, int vl);
+    static void worker_action(WorkerData* worker_data, int vl);
+    static std::thread create_worker(WorkerData* worker_data, int vl);
 
+    DLDevice ctx{};
+    std::vector<std::thread> workers;
+    std::vector<WorkerData> workers_data;
+
+    const CK::BenchmarkSettings *settings;
     CK::BenchmarkSession *session;
-    std::unique_ptr<CK::IBenchmark> benchmark;
-    tvm::runtime::NDArray input_tensor;
-    tvm::runtime::NDArray output_tensor;
-
-    tvm::runtime::Module mod_factory;
-    RuntimeModule& get_runtime();
-    static thread_local RuntimeModule* runtime_;
 };
 
 
 class SystemUnderTestTVM : public mlperf::SystemUnderTest {
 public:
-    explicit SystemUnderTestTVM(Program *_prg);
+    explicit SystemUnderTestTVM(Program *_prg, mlperf::TestScenario _test_scenario);
     ~SystemUnderTestTVM() override = default;
 
     const std::string& Name() const override { return name_; }
@@ -75,6 +94,7 @@ public:
 private:
     std::string name_{"TVM_SUT"};
     Program *prg;
+    const mlperf::TestScenario test_scenario;
     long query_counter;
 };
 

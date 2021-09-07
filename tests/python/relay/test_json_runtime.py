@@ -66,7 +66,6 @@ def check_result(
         out = tvm.nd.empty(out_shape, device=device, dtype=dtype)
         out = rt_mod.get_output(0, out)
         ref_result = out.numpy()
-        print("ref result: ", ref_result)
         np.set_printoptions(threshold=np.inf)
 
     def check_vm_result():
@@ -77,7 +76,6 @@ def check_result(
         exe = runtime.vm.Executable.load_exec(code, lib)
         vm = runtime.vm.VirtualMachine(exe, device)
         out = vm.run(**map_inputs)
-        print("opt result: ", out.numpy())
         tvm.testing.assert_allclose(out.numpy(), ref_result, rtol=tol, atol=atol)
 
     def check_graph_executor_result():
@@ -1058,6 +1056,8 @@ def test_qnn_batch_matmul_reshape_dequantize():
             print("skip because DNNL codegen is not available")
             return
 
+        data_b = np.random.uniform(-10, 10, b_shape).astype("int32")
+
         data_i = np.random.uniform(0, 30, d_shape).astype("int8")
         data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
 
@@ -1090,6 +1090,58 @@ def test_qnn_batch_matmul_reshape_dequantize():
         check_result(mod, ref_mod, {"in": data_i}, (1, IC, h, h),
                       tol=1e-10, atol=0, dtype="float32")
 
+def test_qnn_dense_reshape_dequantize_add():
+    """
+    :return:
+    """
+
+    for h, w in (
+            (4, 9),
+            (64, 32),
+            (17, 23),
+    ):
+        dtype = "float32"
+        NB = 1
+        OC = 8
+        d_shape = (h, w)
+        w_shape = (OC, w)
+        b_shape = (OC,)
+        if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+            print("skip because DNNL codegen is not available")
+            return
+
+        data_i = np.random.uniform(0, 30, d_shape).astype("int8")
+        data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+        data_b = np.random.uniform(-1, 1, b_shape).astype("float32")
+        in_d = relay.var("in", shape=d_shape, dtype="int8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype="int32")
+        in_d_zp = relay.const(0, dtype="int32")
+        in_d_sc = relay.const(0.1, dtype=dtype)
+        in_w_zp = relay.const(0, dtype="int32")
+        in_w_sc = relay.const(0.12, dtype=dtype)
+
+        rq_in_zp = relay.const(0.0, dtype="int32")
+        rq_in_sc = relay.const(0.02, dtype=dtype)
+        rq_out_zp = relay.const(0, dtype="int32")
+        rq_out_sc = relay.const(0.1, dtype=dtype)
+
+        op = tvm.relay.qnn.op.dense(in_d, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                    OC, out_dtype="int32")
+        op = tvm.relay.reshape(data = op, newshape=(1, h, OC))
+        op = tvm.relay.qnn.op.dequantize(data = op, input_scale = rq_out_sc, input_zero_point = rq_out_zp)
+        bs = tvm.relay.cast(in_b, dtype="float32")
+        op = tvm.relay.add(op, bs)
+        func = relay.Function([in_d], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+        mod = partition_for_dnnl(ref_mod)
+        assert not tvm.ir.structural_equal(ref_mod, mod)
+        # # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in": data_i}, (1, h, OC),
+                      tol=1e-10, atol=0, dtype="float32")
+
+
 if __name__ == "__main__":
 #     test_conv2d()
 #     test_add()
@@ -1104,6 +1156,7 @@ if __name__ == "__main__":
 #     test_qnn_conv2d_sum()
     # test_qnn_dense()
     # test_qnn_batch_matmul()
-    test_qnn_batch_matmul_reshape_dequantize()
+    # test_qnn_batch_matmul_reshape_dequantize()
+    test_qnn_dense_reshape_dequantize_add()
 #    test_qnn_dense_s8s8s32()
 

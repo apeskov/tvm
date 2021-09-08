@@ -362,6 +362,37 @@ TVM_REGISTER_GLOBAL("runtime.config_threadpool").set_body([](TVMArgs args, TVMRe
 }  // namespace runtime
 }  // namespace tvm
 
+class OMPArena {
+ public:
+  OMPArena() 
+  : num_threads_(tvm::runtime::threading::MaxConcurrency()), arena_idx_(total_arena_count_++) {
+    setAffinity();
+  }
+ private:  
+  void setAffinity() {
+
+    unsigned cores_offset = num_threads_ * arena_idx_;
+    // set affinity for internal
+    omp_set_num_threads(num_threads_);
+    #pragma omp parallel num_threads(num_threads_)
+    {
+      unsigned core_id = cores_offset + omp_get_thread_num();
+      
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(core_id, &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    }
+  }
+  int num_threads_ = 0;
+  int arena_idx_ = 0;
+  static std::atomic<int> total_arena_count_;
+};
+
+std::atomic<int> OMPArena::total_arena_count_ = {0};
+
+static OMPArena* ThreadLocalOMP() { return dmlc::ThreadLocalStore<OMPArena>::Get(); }
+
 int TVMBackendParallelLaunch(FTVMParallelLambda flambda, void* cdata, int num_task) {
   int num_workers = tvm::runtime::threading::MaxConcurrency();
   if (num_workers == 1) {
@@ -377,7 +408,8 @@ int TVMBackendParallelLaunch(FTVMParallelLambda flambda, void* cdata, int num_ta
     return res;
 #else
     if (num_task == 0) num_task = num_workers;
-    omp_set_num_threads(num_task);
+    auto arena = ThreadLocalOMP();
+    // omp_set_num_threads(num_task);
 #pragma omp parallel num_threads(num_task)
     {
       TVMParallelGroupEnv env;

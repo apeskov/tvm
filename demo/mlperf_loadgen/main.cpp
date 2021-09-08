@@ -51,6 +51,18 @@ void TestTVM(Program *prg) {
 
     SystemUnderTestTVM sut(prg, ts.scenario);
     QuerySampleLibraryTVM qsl(prg);
+
+    mlperf::TestSettings ts_wormup = ts;
+    ts_wormup.server_target_qps = 1000;
+    ts_wormup.max_duration_ms = 30000;
+    ts_wormup.min_duration_ms = 30000;
+    ts_wormup.min_query_count = 24576;
+
+    mlperf::LogSettings log_settings_wormup = log_settings;
+    log_settings_wormup.log_output.outdir += "_1";
+    log_settings_wormup.enable_trace = false;
+
+    mlperf::StartTest(&sut, &qsl, ts_wormup, log_settings_wormup);
     mlperf::StartTest(&sut, &qsl, ts, log_settings);
 
     std::string cmd = std::string("python3") + " " +

@@ -46,13 +46,23 @@ def run_module(g_module):
     g_module.run()
 
 
+def exclude_hyperthreading(idxs):
+    num_hw_cores = multiprocessing.cpu_count() // 2
+    num_hw_cores_per_cpu = num_hw_cores // 2
+
+    return [ el + el // num_hw_cores_per_cpu * num_hw_cores_per_cpu for el in idxs]
+
+
 def arena_wrp(init_f, action_f, args, arena_size, arena_idx, still_running, init_barrier, res_count, res_time):
     idx_start = arena_size * arena_idx
     arena_size = min(multiprocessing.cpu_count() - idx_start, arena_size)
     idx_end = idx_start + arena_size
 
+    cores_idxs = range(idx_start, idx_end)
+    cores_idxs = exclude_hyperthreading(cores_idxs)
+
     # OMP_PLACES="{N},{N+1},{N+2},...,{N+SZ}"
-    arena_places_str = "{" + "},{".join(str(i) for i in range(idx_start, idx_end)) + "}"
+    arena_places_str = "{" + "},{".join(str(i) for i in cores_idxs) + "}"
 
     os.environ['OMP_NUM_THREADS'] = str(arena_size)
     os.environ['OMP_PLACES'] = arena_places_str  # "cores"
@@ -259,7 +269,7 @@ def main():
     benchmark_time_sec = 10
     chill_out_time_sec = 1
 
-    num_cores = multiprocessing.cpu_count()
+    num_cores = multiprocessing.cpu_count() // 2
 
     
     throughput_mod_res = []

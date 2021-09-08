@@ -1,4 +1,5 @@
 #include "classification.h"
+#include "logging.h"
 
 Queue<std::vector<mlperf::QuerySample>> Program::samples_queue;
 CK::DataHandler<tvm::runtime::NDArray> Program::data_handler;
@@ -21,20 +22,25 @@ bool Program::query_response(WorkerData* worker_data, int vl) {
     std::vector<mlperf::QuerySampleResponse> responses;
     responses.reserve(samples.size());
     float encoding_buffer[samples.size()];
-    int i = 0;
-    for (auto s : samples) {
-        int predicted_class = inference(s.index, worker_data);
+    {
+        auto tracer = mlperf::MakeScopedTracer(
+          [](mlperf::logging::AsyncTrace& trace) { trace("TVM_processing"); });
 
-        if (vl > 1) {
-            std::cout << "Query image index: " << s.index << " -> Predicted class: " << predicted_class << std::endl
-                      << std::endl;
-        } else if (vl) {
-            std::cout << 'p' << std::flush;
+        int i = 0;
+        for (auto s : samples) {
+            int predicted_class = inference(s.index, worker_data);
+
+            if (vl > 1) {
+                std::cout << "Query image index: " << s.index << " -> Predicted class: " << predicted_class << std::endl
+                        << std::endl;
+            } else if (vl) {
+                std::cout << 'p' << std::flush;
+            }
+
+            encoding_buffer[i] = (float) predicted_class;
+            responses.push_back({s.id, uintptr_t(&encoding_buffer[i]), sizeof(encoding_buffer[i])});
+            ++i;
         }
-
-        encoding_buffer[i] = (float) predicted_class;
-        responses.push_back({s.id, uintptr_t(&encoding_buffer[i]), sizeof(encoding_buffer[i])});
-        ++i;
     }
     mlperf::QuerySamplesComplete(responses.data(), responses.size());
     return true;

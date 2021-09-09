@@ -158,6 +158,16 @@ def make_pattern_qnn_batch_matmul_reshape_dequantize():
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
     return pat
 
+def make_pattern_gelu(inpt=None):
+    if inpt == None:
+        inpt = wildcard()
+    div = is_op("divide")(inpt, is_constant())
+    pat = is_op("erf")(div)
+    mul = is_op("multiply")(inpt, is_constant())
+    pat = is_op("add")(pat, is_constant())
+    pat = is_op("multiply")(mul, pat)
+    return pat
+
 def make_pattern_qnn_dense_reshape_dequantize():
     pat = wildcard()
     weight = wildcard()
@@ -169,14 +179,18 @@ def make_pattern_qnn_dense_reshape_dequantize():
     pat = is_op("add")(pat, bias)
     return pat
 
-def make_pattern_gelu():
-    inpt = wildcard()
-    div = is_op("divide")(inpt, is_constant())
-    pat = is_op("erf")(div)
-    mul = is_op("multiply")(inpt, is_constant())
-    pat = is_op("add")(pat, is_constant())
-    pat = is_op("multiply")(mul, pat)
-    return pat
+
+def make_pattern_qnn_dense_reshape_dequantize_gelu():
+    pat = wildcard()
+    weight = wildcard()
+    bias = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
+    biasVal = is_op("cast")(bias)
+    pat = is_op("add")(pat, bias)
+    return make_pattern_gelu(pat)
+
 
 @register_pattern_table("dnnl")
 def pattern_table():
@@ -187,6 +201,7 @@ def pattern_table():
     dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
     batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
     # batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
+    dense_reshape_dequantize_gelu_pat = ("dnnl.qnn.dense_dequantize_gelu", make_pattern_qnn_dense_reshape_dequantize_gelu())
     dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
     gelu_pat = ("dnnl.qnn.gelu", make_pattern_gelu())
     dnnl_patterns = [conv2d_bias_relu_pat,
@@ -195,9 +210,10 @@ def pattern_table():
                      conv2d_qnn_pat,
                      dense_qnn_pat,
                      batch_matmul_pat,
+                     dense_reshape_dequantize_gelu_pat,
                      gelu_pat,
                     #  batch_matmul_reshape_dequantize_pat,
-                     dense_reshape_dequantize_pat
+                    dense_reshape_dequantize_pat
                     ]
     return dnnl_patterns
 

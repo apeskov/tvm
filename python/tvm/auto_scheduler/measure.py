@@ -1099,7 +1099,7 @@ def _rpc_run(
         costs = (MAX_FLOAT,)
         error_no = MeasureErrorNo.COMPILE_DEVICE
         error_msg = make_traceback_info()
-
+    loc_args = [None] * len(args)
     if error_no == 0:
         try:
             stream = dev.create_raw_stream()
@@ -1118,16 +1118,16 @@ def _rpc_run(
                         get_const_tuple(build_res_arg.shape), build_res_arg.dtype, dev
                     )
                     random_fill(empty_array)
-                    args[idx] = empty_array
+                    loc_args[idx] = empty_array
                 else:
-                    args[idx] = ndarray.array(args[idx], dev)
+                    loc_args[idx] = ndarray.array(args[idx], dev)
             dev.sync()
 
             # First run for check that the kernel is correct
-            func.entry_func(*args)
+            func.entry_func(*loc_args)
             dev.sync()
 
-            costs = time_f(*args).results
+            costs = time_f(*loc_args).results
 
             # clean up remote files
             remote.remove(build_res.filename)

@@ -92,7 +92,7 @@ _register_external_op_helper("nn.relu")
 # _register_external_op_helper("add")
 # _register_external_op_helper("subtract")
 # _register_external_op_helper("multiply")
-_register_external_op_helper("qnn.batch_matmul")
+#_register_external_op_helper("qnn.batch_matmul")
 #_register_external_op_helper("qnn.dense")
 
 def make_pattern(with_bias=True):
@@ -200,7 +200,7 @@ def pattern_table():
     conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
     dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
     batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
-    # batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
+    batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
     dense_reshape_dequantize_gelu_pat = ("dnnl.qnn.dense_dequantize_gelu", make_pattern_qnn_dense_reshape_dequantize_gelu())
     dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
     gelu_pat = ("dnnl.qnn.gelu", make_pattern_gelu())
@@ -210,10 +210,10 @@ def pattern_table():
                      conv2d_qnn_pat,
                      dense_qnn_pat,
                      batch_matmul_pat,
-                     dense_reshape_dequantize_gelu_pat,
+                    #  dense_reshape_dequantize_gelu_pat,
                      gelu_pat,
-                    #  batch_matmul_reshape_dequantize_pat,
-                    dense_reshape_dequantize_pat
+                     batch_matmul_reshape_dequantize_pat,
+                     dense_reshape_dequantize_pat
                     ]
     return dnnl_patterns
 

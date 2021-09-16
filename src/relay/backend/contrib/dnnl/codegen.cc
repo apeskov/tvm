@@ -465,14 +465,27 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
         // call = GetRootCall(fn->body.as<CallNode>(), 3,
                           //  {"qnn.dense", "reshape", "qnn.dequantize", "add"});
         call = fn->body.as<CallNode>();
+      } else if ("dnnl.qnn.dense_dequantize_add_quantize" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 4,
+                            {"qnn.dense", "reshape", "qnn.dequantize", "add", "qnn.quantize"});
       } else if ("dnnl.qnn.dense_dequantize" == name){
-        call = GetRootCall(fn->body.as<CallNode>(), 3,
-                            {"qnn.dense", "reshape", "qnn.dequantize", "add"});
-        // call = fn->body.as<CallNode>();
-      }
-       else if ("dnnl.qnn.gelu" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 2,
+                            {"qnn.dense", "reshape", "qnn.dequantize"});
+      } else if ("dnnl.qnn.batch_matmul_requantize" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 4,
+                            {"qnn.batch_matmul", "reshape", "transpose","reshape", "qnn.requantize"});
+      } else if ("dnnl.qnn.gelu" == name){
         call = fn->body.as<CallNode>();
-      } else {
+      } else if ("dnnl.qnn.batchnorm" == name){
+        call = fn->body.as<CallNode>();
+        // call = GetRootCall(fn->body.as<CallNode>(), 6,
+        //                     {"mean", "subtract", "power", "mean", "add", "subtract", "divide"});
+      } else if ("dnnl.qnn.softmax" == name) {
+        call = fn->body.as<CallNode>();
+        // call = GetRootCall(fn->body.as<CallNode>(), 4,
+        //                      {"max", "subtract", "exp", "sum", "divide"});
+      }
+      else {
           LOG(FATAL) << "Unrecognized DNNL pattern: " << name;
       }
       ICHECK(call->op.as<OpNode>()) << "Not op node";
@@ -589,6 +602,69 @@ TVM_REGISTER_GLOBAL("relay.ext.dnnl").set_body_typed(DNNLCompiler);
  *
  */
 
+/**
+ * \brief A helper to expand the params by adding ones which used by DNNL runtime
+ * for a given expression. Same as default ConstantUpdater but skip constant from
+ * essential DNNL composed function ops.
+ */
+struct DNNLConstantUpdater : public ConstantUpdater {
+public:
+  DNNLConstantUpdater(const std::string& symbol,
+                      std::unordered_map<std::string, runtime::NDArray>* params,
+                      const std::vector<std::string>& skip_mask)
+      : ConstantUpdater(symbol, params), skip_mask_(skip_mask) {}
+  using ConstantUpdater::VisitExpr_;
+
+  /**!
+   * Like an original implementation but avoid visiting of body nodes
+   * for DNNL specific composite primitives.
+   */
+  void VisitExpr_(const FunctionNode* op) final {
+    this->VisitSpan(op->span);
+    for (auto param : op->params) {
+      this->VisitExpr(param);
+    }
+
+    if (!isDNNLSpecificCompositeFunc(op)) {
+      this->VisitExpr(op->body);
+    }
+  }
+
+private:
+  bool isDNNLSpecificCompositeFunc(const FunctionNode* op) {
+
+    auto comp = op->GetAttr<String>(attr::kComposite);
+    if (!comp) return false;
+
+    auto comp_name = comp.value();
+    bool is_match = false;
+    for (const auto& mask : skip_mask_) {
+      if (std::string(comp_name).substr(0, mask.size()) == mask) {
+        is_match = true;
+        break;
+      }
+    }
+    return is_match;
+  }
+
+  std::vector<std::string> skip_mask_;
+};
+
+Map<String, runtime::NDArray> DNNLConstantUpdaterFunc(Expr expr, std::string symbol) {
+  std::vector<std::string> dnnl_composite_filter = {"dnnl."};
+
+  // Visit all suitable constant nodes
+  std::unordered_map<std::string, runtime::NDArray> res;
+  DNNLConstantUpdater const_updater(symbol, &res, dnnl_composite_filter);
+  const_updater(expr);
+
+  // Convert to tvm::Map
+  Map<String, runtime::NDArray> ret;
+  for (const auto& kvp : res) ret.Set(kvp.first, kvp.second);
+  return ret;
+}
+
+TVM_REGISTER_GLOBAL("relay.ext.dnnl.constant_updater").set_body_typed(DNNLConstantUpdaterFunc);
 
 }  // namespace contrib
 }  // namespace relay

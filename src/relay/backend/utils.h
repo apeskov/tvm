@@ -190,7 +190,7 @@ inline void UpdateConstants(Function func,
     for (const auto& it : constants) {
       std::string const_name(it.first);
       // Constant names should begin this the compiler name (to avoid conflicts)
-      ICHECK(const_name.find(codegen_name) == 0)
+      ICHECK(const_name.find(codegen_name) != std::string::npos)
           << "External constant names must start with compiler name";
       (*params)[const_name] = it.second;
     }

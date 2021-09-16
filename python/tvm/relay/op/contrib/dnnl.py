@@ -35,10 +35,10 @@ check the attributes of the op and decide if it should be offloaded to DNNL.
 import tvm.ir
 from tvm.relay import transform
 from tvm.relay.build_module import bind_params_by_name
-from ...dataflow_pattern import wildcard, is_op, is_constant
+from ...dataflow_pattern import wildcard, is_op, is_constant, is_expr
 from .register import register_pattern_table, get_pattern_table
-
-
+from tvm.relay.expr import const
+import math
 def partition_for_dnnl(mod, params=None):
     if params:
         mod["main"] = bind_params_by_name(mod["main"], params)
@@ -92,8 +92,8 @@ _register_external_op_helper("nn.relu")
 # _register_external_op_helper("add")
 # _register_external_op_helper("subtract")
 # _register_external_op_helper("multiply")
-#_register_external_op_helper("qnn.batch_matmul")
-#_register_external_op_helper("qnn.dense")
+_register_external_op_helper("qnn.batch_matmul")
+_register_external_op_helper("qnn.dense")
 
 def make_pattern(with_bias=True):
     data = wildcard()
@@ -164,8 +164,20 @@ def make_pattern_gelu(inpt=None):
     div = is_op("divide")(inpt, is_constant())
     pat = is_op("erf")(div)
     mul = is_op("multiply")(inpt, is_constant())
-    pat = is_op("add")(pat, is_constant())
+    pat = is_op("add")(pat, is_expr(const(1, dtype="float32")))
     pat = is_op("multiply")(mul, pat)
+    return pat
+
+def make_pattern_qnn_dense_reshape_dequantize_add_quantize():
+    pat = wildcard()
+    weight = wildcard()
+    bias = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
+    biasVal = is_op("cast")(bias)
+    pat = is_op("add")(pat, bias)
+    pat = is_op("qnn.quantize")(pat, wildcard(), wildcard())
     return pat
 
 def make_pattern_qnn_dense_reshape_dequantize():
@@ -175,10 +187,17 @@ def make_pattern_qnn_dense_reshape_dequantize():
     pat = is_op("qnn.dense")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
     pat = is_op("reshape")(pat)
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
-    biasVal = is_op("cast")(bias)
-    pat = is_op("add")(pat, bias)
     return pat
 
+def  make_pattern_qnn_batch_matmul_reshape_requantize():
+    pat     = wildcard()
+    weights = wildcard()
+    pat = is_op("qnn.batch_matmul")(pat, weights, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("transpose")(pat)
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.requantize")(pat, wildcard(), wildcard(), wildcard(), wildcard())
+    return pat
 
 def make_pattern_qnn_dense_reshape_dequantize_gelu():
     pat = wildcard()
@@ -189,8 +208,31 @@ def make_pattern_qnn_dense_reshape_dequantize_gelu():
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
     biasVal = is_op("cast")(bias)
     pat = is_op("add")(pat, bias)
-    return make_pattern_gelu(pat)
+    pat = make_pattern_gelu(pat)
+    pat = is_op("qnn.quantize")(pat, wildcard(), wildcard())
+    return pat
 
+def make_pattern_batchnorm():
+    pat  = wildcard()
+    mean = is_op("mean")(pat)
+    subt = is_op("subtract")(pat, mean)
+    pow  = is_op("power")(subt, is_expr(const(2, dtype="float32")))
+    pat  = is_op("mean")(pow)
+    pat  = is_op("add")(pat, wildcard())
+    pat  = is_op("sqrt")(pat)
+    pat  = is_op("divide")(subt, pat)
+    pat  = is_op("multiply")(pat, wildcard())
+    pat  = is_op("add")(pat, wildcard())
+    return pat
+
+def make_pattern_softmax():
+    pat = wildcard()
+    max = is_op("max")(pat)
+    pat = is_op("subtract")(pat, max)
+    exp = is_op("exp")(pat)
+    sum = is_op("sum")(exp)
+    pat = is_op("divide")(exp, sum)
+    return pat
 
 @register_pattern_table("dnnl")
 def pattern_table():
@@ -202,18 +244,26 @@ def pattern_table():
     batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
     batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
     dense_reshape_dequantize_gelu_pat = ("dnnl.qnn.dense_dequantize_gelu", make_pattern_qnn_dense_reshape_dequantize_gelu())
-    dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
+    dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize_add_quantize", make_pattern_qnn_dense_reshape_dequantize_add_quantize())
+    batch_matmul_reshape_requantize_pat = ("dnnl.qnn.batch_matmul_requantize", make_pattern_qnn_batch_matmul_reshape_requantize())
     gelu_pat = ("dnnl.qnn.gelu", make_pattern_gelu())
+    batchnorm_pat = ("dnnl.qnn.batchnorm", make_pattern_batchnorm())
+    softmax_pat   = ("dnnl.qnn.softmax", make_pattern_softmax())
+    dense_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
     dnnl_patterns = [conv2d_bias_relu_pat,
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
-                     dense_qnn_pat,
+                    #  dense_qnn_pat,
+                     dense_reshape_dequantize_gelu_pat,
+                     #gelu_pat,
+                    #  batch_matmul_reshape_dequantize_pat,
+                    #  batch_matmul_reshape_requantize_pat,
                      batch_matmul_pat,
-                    #  dense_reshape_dequantize_gelu_pat,
-                     gelu_pat,
-                     batch_matmul_reshape_dequantize_pat,
-                     dense_reshape_dequantize_pat
+                     dense_reshape_dequantize_pat,
+                     dense_dequantize_pat,
+                    # batchnorm_pat,
+                     softmax_pat
                     ]
     return dnnl_patterns
 

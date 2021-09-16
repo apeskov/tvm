@@ -306,8 +306,10 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           BatchMatMulRequantize(nid);
         } else if ("qnn.dense" == op_name) {
           Denses8s8s32(nid);
-        } else if ("dnnl.qnn.dense_dequantize" == op_name){
+        } else if ("dnnl.qnn.dense_dequantize_add_quantize" == op_name){
           DenseMulDequantizeGELU(nid, false);
+        } else if ("dnnl.qnn.dense_dequantize" == op_name){
+          DenseMulDequantize(nid);
         } else if ("dnnl.qnn.dense_dequantize_gelu" == op_name){
           DenseMulDequantizeGELU(nid);
         } else if ("dnnl.qnn.gelu" == op_name){
@@ -1182,13 +1184,11 @@ std::tuple<
     // Memory shapes.
     dnnl::memory::dims data_dims = {B, IC};
     dnnl::memory::dims weight_dims = {OC, IC};
-    // dnnl::memory::dims bias_dims = {OC};
     dnnl::memory::dims out_dims = {B, OC};
 
     // Memory descriptions.
     auto data_md = dnnl::memory::desc({data_dims, dt::s8, tag::nc});
     auto weight_md = dnnl::memory::desc({weight_dims, dt::s8, tag::nc});
-    // auto bias_md = dnnl::memory::desc({bias_dims, dt::s32, tag::x});
     auto dst_md = dnnl::memory::desc({out_dims, dt::s32, tag::nc});
 
     // Dense description.
@@ -1208,7 +1208,6 @@ std::tuple<
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                          {DNNL_ARG_WEIGHTS, weight_memory},
-                        //  {DNNL_ARG_BIAS, bias_memory},
                          {DNNL_ARG_DST, dst_memory}});
   }
 
@@ -1319,11 +1318,6 @@ std::tuple<
     ICHECK_EQ(out_shape[0].size(), 3);
     auto data_entry = node.GetInputs()[0];
     auto weight_entry = node.GetInputs()[1];
-    // sshtin ToDo: use these values in case of dequantization
-    // auto src_zero_point = node.GetInputs()[2];
-    // auto dst_zero_point = node.GetInputs()[3];
-    // auto src_scale = node.GetInputs()[4];
-    // auto dst_scale = node.GetInputs()[5];
 
     dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
     dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
@@ -1360,16 +1354,6 @@ std::tuple<
     // Setup attributes.
     auto node = nodes_[nid];
     ICHECK_EQ(node.GetInputs().size(), 8);
-    std::cout << symbol_name_ << std::endl;
-    std::cout << node.GetOpName() << std::endl;
-    for (auto x : node.GetInputs()) {
-      auto shape  = nodes_[x.id_].GetOpShape()[x.index_];
-      std::cout << nodes_[x.id_].GetOpDataType()[x.index_] << " ";
-      for (auto y : shape) {
-        std::cout << y << " ";
-      }
-      std::cout << "\n";
-    }
 
     auto out_shape = node.GetOpShape();
     ICHECK_EQ(out_shape.size(), 1);
@@ -1429,16 +1413,6 @@ std::tuple<
   void BatchMatMulRequantize(const size_t& nid) {
     // Setup attributes.
     auto node = nodes_[nid];
-    std::cout << symbol_name_ << std::endl;
-    std::cout << node.GetOpName() << std::endl;
-    for (auto x : node.GetInputs()) {
-      auto shape  = nodes_[x.id_].GetOpShape()[x.index_];
-      std::cout << nodes_[x.id_].GetOpDataType()[x.index_] << " ";
-      for (auto y : shape) {
-        std::cout << y << " ";
-      }
-      std::cout << "\n";
-    }
     ICHECK_EQ(node.GetInputs().size(), 10);
     auto out_shape = node.GetOpShape();
     ICHECK_EQ(out_shape.size(), 1);
@@ -1520,7 +1494,7 @@ std::tuple<
   void DenseMulDequantizeGELU(const size_t& nid, bool postop = true) {
     // Setup attributes.
     auto node = nodes_[nid];
-    ICHECK_EQ(node.GetInputs().size(), 9);
+    ICHECK_EQ(node.GetInputs().size(), 11);
     auto out_shape = node.GetOpShape();
     ICHECK_EQ(out_shape.size(), 1);
     ICHECK((out_shape[0].size() == 2) || ((out_shape[0].size() == 3 && out_shape[0][0] == 1)));
@@ -1531,11 +1505,16 @@ std::tuple<
     auto src_scale      = node.GetInputs()[4];
     auto dst_scale      = node.GetInputs()[5];
     auto bias_entry     = node.GetInputs()[8];
+    auto output_scale      = node.GetInputs()[9];
+    auto output_zero_point = node.GetInputs()[10];
     float   src_scale_val      = get_value<float>(src_scale);
     int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
 
     float   dst_scale_val      = get_value<float>(dst_scale);
     int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
+
+    float   output_scale_val      = get_value<float>(output_scale);
+    int32_t output_zero_point_val = get_value<int32_t>(output_zero_point);
 
     dnnl::memory::dims input_shape  = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
     dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
@@ -1551,21 +1530,20 @@ std::tuple<
     dnnl::memory::dims bias_dims   = {bias_shape[0]};
     dnnl::memory::dims out_dims    = {input_shape[0], weight_shape[0]};
 
-    auto data_md   = dnnl::memory::desc({data_dims, dt::s8, tag::ab});
-    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8, tag::ab});
-    auto bias_md   = dnnl::memory::desc({bias_dims, dt::f32, tag::a});
-    auto dst_md    = dnnl::memory::desc({out_dims, dt::f32, tag::ab});
+    auto data_md   = dnnl::memory::desc({data_dims,   dt::s8,  tag::ab});
+    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8,  tag::ab});
+    auto bias_md   = dnnl::memory::desc({bias_dims,   dt::f32, tag::a});
+    auto dst_md    = dnnl::memory::desc({out_dims,    dt::s8, tag::ab});
     dnnl::primitive_attr attr;
     attr.set_output_scales(0, {src_scale_val * dst_scale_val});
     attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
     attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
+    dnnl::post_ops ops;
     if (postop) {
-      dnnl::post_ops ops;
       ops.append_eltwise(1.f, dnnl::algorithm::eltwise_gelu_erf, 1.f, 0.f);
-      attr.set_post_ops(ops);
     }
-    // Explicit scratchpad specification
-    attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+    ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_linear, (1.0f / output_scale_val), (float)output_zero_point_val);
+    attr.set_post_ops(ops);
 
     // Dense description.
     auto dense_desc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_inference, data_md,
@@ -1588,6 +1566,7 @@ std::tuple<
     dnnl::memory bias_memory;
     if (dl_tensor != nullptr) {
       dnnl::memory bias_memory(bias_md, engine_);
+      internal_mem_.push_back(bias_memory);
       float* pDst = static_cast<float*>(bias_memory.get_data_handle());
       const float* pSrc = static_cast<float*>(dl_tensor->data);
       for (int i = 0; i < bias_shape[0]; ++i) {
@@ -1597,7 +1576,8 @@ std::tuple<
       net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                           {DNNL_ARG_WEIGHTS, weight_memory},
                           {DNNL_ARG_BIAS, bias_memory},
-                          {DNNL_ARG_DST, dst_memory}});
+                          {DNNL_ARG_DST, dst_memory}
+                          });
 
     } else {
       doPreprocess_ = true;
@@ -1605,9 +1585,75 @@ std::tuple<
       net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                           {DNNL_ARG_WEIGHTS, weight_memory},
                           {DNNL_ARG_BIAS, bias_memory},
-                          {DNNL_ARG_DST, dst_memory}});
+                          {DNNL_ARG_DST, dst_memory}
+                          });
 
     }
+  }
+
+  void DenseMulDequantize(const size_t& nid) {
+    // Setup attributes.
+    auto node = nodes_[nid];
+    ICHECK_EQ(node.GetInputs().size(), 8);
+    auto out_shape = node.GetOpShape();
+    ICHECK_EQ(out_shape.size(), 1);
+    ICHECK((out_shape[0].size() == 2) || ((out_shape[0].size() == 3 && out_shape[0][0] == 1)));
+    auto data_entry     = node.GetInputs()[0];
+    auto weight_entry   = node.GetInputs()[1];
+    auto src_zero_point = node.GetInputs()[2];
+    auto dst_zero_point = node.GetInputs()[3];
+    auto src_scale      = node.GetInputs()[4];
+    auto dst_scale      = node.GetInputs()[5];
+    auto deq_scale      = node.GetInputs()[6];
+    auto deq_zero_point = node.GetInputs()[7];
+
+    float   src_scale_val      = get_value<float>(src_scale);
+    int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
+
+    float   dst_scale_val      = get_value<float>(dst_scale);
+    int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
+
+    float   deq_scale_val      = get_value<float>(deq_scale);
+    int32_t deq_zero_point_val = get_value<int32_t>(deq_zero_point);
+
+    dnnl::memory::dims input_shape  = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
+    dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
+
+    ICHECK_EQ(input_shape.size(), 2) << "input shape should have 2 dimentions.";
+    ICHECK_EQ(weight_shape.size(), 2) << "weights shape should have 2 dimentions.";
+    ICHECK_EQ(nodes_[data_entry.id_].GetOpDataType()[data_entry.index_].bits, 8);
+    ICHECK_EQ(nodes_[weight_entry.id_].GetOpDataType()[weight_entry.index_].bits, 8);
+
+    dnnl::memory::dims data_dims   = {input_shape[0], input_shape[1]};
+    dnnl::memory::dims weight_dims = {weight_shape[0], input_shape[1]};
+    dnnl::memory::dims out_dims    = {input_shape[0], weight_shape[0]};
+
+    auto data_md   = dnnl::memory::desc({data_dims,   dt::s8,  tag::ab});
+    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8,  tag::ab});
+    auto dst_md    = dnnl::memory::desc({out_dims,    dt::f32, tag::ab});
+    dnnl::primitive_attr attr;
+    attr.set_output_scales(0, { deq_scale_val});
+    attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
+    attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
+    // Dense description.
+    auto dense_desc = dnnl::inner_product_forward::desc(dnnl::prop_kind::forward_inference, data_md,
+                                                        weight_md, dst_md);
+    auto dense_prim_desc = dnnl::inner_product_forward::primitive_desc(dense_desc, attr, engine_);
+    auto dense = dnnl::inner_product_forward(dense_prim_desc);
+
+    net_.push_back(dense);
+
+    // // Memory mappings.
+    auto data_memory   = BindDNNLMemory(data_entry, data_md);
+    auto weight_memory = BindDNNLMemory(weight_entry, weight_md);
+    JSONGraphNodeEntry out_entry(nid, 0);
+    auto dst_memory = BindDNNLMemory(out_entry, dst_md);
+
+    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                        {DNNL_ARG_WEIGHTS, weight_memory},
+                        {DNNL_ARG_DST, dst_memory}
+                        });
+
   }
 
   void GELU(const size_t& nid) {
@@ -1655,17 +1701,6 @@ std::tuple<
 
   void DNNLBatchNorm(const size_t& nid) {
     auto node = nodes_[nid];
-
-    std::cout << node.GetInputs().size() << std::endl;
-    std::cout << node.GetOpName() << std::endl;
-    for (auto x : node.GetInputs()) {
-      auto shape  = nodes_[x.id_].GetOpShape()[x.index_];
-      std::cout << nodes_[x.id_].GetOpDataType()[x.index_] << " ";
-      for (auto y : shape) {
-        std::cout << y << " ";
-      }
-      std::cout << "\n";
-    }
 
     ICHECK_EQ(node.GetInputs().size(), 4);
     auto input_entry = node.GetInputs()[0];

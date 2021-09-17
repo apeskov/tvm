@@ -254,16 +254,16 @@ def pattern_table():
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
-                    #  dense_qnn_pat,
                      dense_reshape_dequantize_gelu_pat,
-                     #gelu_pat,
-                    #  batch_matmul_reshape_dequantize_pat,
+                     batch_matmul_reshape_dequantize_pat,
                     #  batch_matmul_reshape_requantize_pat,
                      batch_matmul_pat,
                      dense_reshape_dequantize_pat,
                      dense_dequantize_pat,
-                    # batchnorm_pat,
-                     softmax_pat
+                     #batchnorm_pat, Cannot be used with BERT model for now
+                     softmax_pat,
+                     dense_qnn_pat,
+                     gelu_pat
                     ]
     return dnnl_patterns
 

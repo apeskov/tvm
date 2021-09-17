@@ -67,12 +67,28 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     //       In case of CPU engine that is safe, because stream is
     //       immediate runner and has no internal state.
     if (doPreprocess_) {
+      ICHECK_EQ(inputs.size(), 3) << "Pattern require 3 parameters.";
       scaledValues_.resize(inputs[2]->shape[0]);
       float* pdata1 = (float*)inputs[2]->data;
       for(size_t i = 0; i < scaledValues_.size(); ++i) {
         scaledValues_[i] = pdata1[i] * biasScale_;
       }
       doPreprocess_ = false;
+    }
+    if (doBNPreprocess_) {
+      ICHECK_EQ(inputs.size(), 3) << "Pattern require 3 parameters.";
+      ICHECK_EQ(net_args_.size(), 1);
+      auto pScaleShift = net_args_[0].find(DNNL_ARG_SCALE_SHIFT);
+      ICHECK_EQ(pScaleShift == net_args_[0].end(), false);
+      int N = inputs[2]->shape[0];
+      auto scale_vals = (float*)inputs[1]->data;
+      auto shift_vals = (float*)inputs[2]->data;
+      float* pDst = static_cast<float*>(pScaleShift->second.get_data_handle());
+      for (int i = 0; i < N; ++i) {
+        pDst[i]     = scale_vals[i];
+        pDst[i + N] = shift_vals[i];
+      }
+      doBNPreprocess_ = false;
     }
     dnnl::stream cur_stream = stream_;
     // map of memory object to replace with provided in/out
@@ -156,7 +172,6 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
 
   /**
    * Override GetFunction() to specify Run method.
-   *
    * @param name name of queried function
    * @param sptr_to_self pointer to self module
    * @return Found function in PackedFunc format, or null if no present
@@ -265,7 +280,8 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
   }
 
  private:
-  bool doPreprocess_ = false; // workaround to fix bias scaling issue
+  bool doPreprocess_ = false; // workaround to fix bias scaling issue for dense layer
+  bool doBNPreprocess_ = false;
   float biasScale_ = 0.0f;
   std::vector<float> scaledValues_;
   // Build up the engine based on the input graph.
@@ -316,6 +332,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           GELU(nid);
         } else if ("dnnl.qnn.batchnorm" == op_name){
           DNNLBatchNorm(nid);
+          // BatchNorm(nid);
         } else if ("dnnl.qnn.softmax" == op_name){
           DNNLSoftMax(nid);
         }
@@ -1362,13 +1379,12 @@ std::tuple<
     auto weight_entry   = node.GetInputs()[1];
     auto src_zero_point = node.GetInputs()[2];
     auto dst_zero_point = node.GetInputs()[3];
-    auto src_scale      = node.GetInputs()[4];
-    auto dst_scale      = node.GetInputs()[5];
-
-    float src_scale_val = get_value<float>(src_scale);
-    float dst_scale_val = get_value<float>(dst_scale);
+    auto deq_scale      = node.GetInputs()[6];
+    auto deq_zero_point = node.GetInputs()[7];
+    float deq_scale_val = get_value<float>(deq_scale);
     int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
     int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
+    int32_t deq_zero_point_val = get_value<int32_t>(deq_zero_point);
 
     dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
     dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
@@ -1385,14 +1401,17 @@ std::tuple<
     } else {
       out_dims = {out_shape[0][0], out_shape[0][1], out_shape[0][2]};
     }
-    auto data_md   = dnnl::memory::desc({data_dims, dt::s8, tag::abc});
-    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8, tag::acb});
-    auto dst_md    = dnnl::memory::desc({out_dims, dt::f32, tag::abc});
+    // sshtin: can't use s8s8s32 or s8s8s8 with avx optimizationas because DNNL
+    // cannot identify support of avx2 on AMD 5600 cores
+    auto data_md   = dnnl::memory::desc({data_dims,   dt::s8,  tag::abc});
+    auto weight_md = dnnl::memory::desc({weight_dims, dt::s8,  tag::acb});
+    auto dst_md    = dnnl::memory::desc({out_dims,    dt::f32, tag::abc});
 
     // Matmul description.
     dnnl::primitive_attr attr;
-    attr.set_output_scales(0, {src_scale_val * dst_scale_val});
+    attr.set_output_scales(0, {deq_scale_val});
     attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
+    attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
 
     auto matmul_desc      = dnnl::matmul::desc(data_md, weight_md, dst_md);
     auto matmul_prim_desc = dnnl::matmul::primitive_desc(matmul_desc, attr, engine_);
@@ -1602,19 +1621,15 @@ std::tuple<
     auto weight_entry   = node.GetInputs()[1];
     auto src_zero_point = node.GetInputs()[2];
     auto dst_zero_point = node.GetInputs()[3];
-    auto src_scale      = node.GetInputs()[4];
     auto dst_scale      = node.GetInputs()[5];
     auto deq_scale      = node.GetInputs()[6];
     auto deq_zero_point = node.GetInputs()[7];
 
-    float   src_scale_val      = get_value<float>(src_scale);
     int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
 
-    float   dst_scale_val      = get_value<float>(dst_scale);
     int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
 
     float   deq_scale_val      = get_value<float>(deq_scale);
-    int32_t deq_zero_point_val = get_value<int32_t>(deq_zero_point);
 
     dnnl::memory::dims input_shape  = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
     dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
@@ -1709,46 +1724,56 @@ std::tuple<
     auto beta_entry  = node.GetInputs()[3];
     float delta_val  = get_value<float>(delta_entry);
     auto out_shape   = node.GetOpShape();
+
     dnnl::memory::dims input_shape = nodes_[input_entry.id_].GetOpShape()[input_entry.index_];
     dnnl::memory::dims gamma_shape = nodes_[gamma_entry.id_].GetOpShape()[gamma_entry.index_];
     dnnl::memory::dims beta_shape  = nodes_[beta_entry.id_].GetOpShape()[beta_entry.index_];
-
-    dnnl::memory::dims out_dims  = out_shape[0];
-    auto data_md  = GenDNNLMemDescByShape({1, input_shape[0], input_shape[1], input_shape[2]}, dt::f32);
-    auto out_md   = GenDNNLMemDescByShape({1, input_shape[0], input_shape[1], input_shape[2]}, dt::f32);
-    auto gamma_md = GenDNNLMemDescByShape({2, gamma_shape[0]}, dt::f32);
-    auto beta_md  = GenDNNLMemDescByShape({2, beta_shape[0]},  dt::f32);
+    int N = beta_shape[0];
+    if (beta_shape.size() == 3) {
+      N = beta_shape[1];
+    }
+    auto data_md  = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
+    auto out_md   = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
+    auto scale_shift_md  = GenDNNLMemDescByShape({2, N},  dt::f32);
     auto batchnorm_desc = dnnl::batch_normalization_forward::desc(dnnl::prop_kind::forward_training,
                                           data_md, delta_val,
                                           dnnl::normalization_flags::use_scale_shift);
-
     auto bnorm_pd = dnnl::batch_normalization_forward::primitive_desc(batchnorm_desc, engine_);
     auto bnorm = dnnl::batch_normalization_forward(bnorm_pd);
     net_.push_back(bnorm);
     // Memory mappings.
     auto data_memory  = BindDNNLMemory(input_entry, data_md);
-    auto gamma_memory = BindDNNLMemory(gamma_entry, gamma_md);
-    auto beta_memory  = BindDNNLMemory(beta_entry,  beta_md);
-    auto mean_mem = dnnl::memory(bnorm_pd.mean_desc(), engine_);
-    auto variance_mem = dnnl::memory(bnorm_pd.variance_desc(), engine_);
+
+    auto mean_mem      = dnnl::memory(bnorm_pd.mean_desc(), engine_);
+    auto variance_mem  = dnnl::memory(bnorm_pd.variance_desc(), engine_);
     auto workspace_mem = dnnl::memory(bnorm_pd.workspace_desc(), engine_);
-    auto scale_vals = get_values<float>(gamma_entry, gamma_shape[0]);
-    auto shift_vals = get_values<float>(beta_entry,  beta_shape[0]);
-    float* pDst = static_cast<float*>(beta_memory.get_data_handle());
-    for (int i = 0; i < beta_shape[0]; ++i) {
-      pDst[i] = scale_vals[i];
-      pDst[i + beta_shape[0]] = shift_vals[i];
+    auto scale_shift_mem = dnnl::memory(scale_shift_md, engine_);
+    internal_mem_.push_back(mean_mem);
+    internal_mem_.push_back(variance_mem);
+    internal_mem_.push_back(workspace_mem);
+    internal_mem_.push_back(scale_shift_mem);
+    auto eid = EntryID(gamma_entry);
+    auto dl_tensor = data_entry_[eid];
+    if (dl_tensor != nullptr) {
+      auto scale_vals = get_values<float>(gamma_entry, N);
+      auto shift_vals = get_values<float>(beta_entry,  N);
+      float* pDst = static_cast<float*>(scale_shift_mem.get_data_handle());
+      for (int i = 0; i < N; ++i) {
+        pDst[i]     = scale_vals[i];
+        pDst[i + N] = shift_vals[i];
+      }
+    } else {
+      doBNPreprocess_ = true;
     }
     JSONGraphNodeEntry out_entry(nid, 0);
     auto dst_memory = BindDNNLMemory(out_entry, out_md);
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                          {DNNL_ARG_SCALE_SHIFT, beta_memory},
+                          {DNNL_ARG_SCALE_SHIFT, scale_shift_mem},
                           {DNNL_ARG_VARIANCE, variance_mem},
                           {DNNL_ARG_MEAN, mean_mem},
                           {DNNL_ARG_WORKSPACE, workspace_mem},
                           {DNNL_ARG_DST, dst_memory}});
-
   }
 
   void DNNLSoftMax(const size_t& nid) {

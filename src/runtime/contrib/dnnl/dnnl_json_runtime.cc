@@ -318,6 +318,8 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           BatchMatMul(nid);
         } else if ("dnnl.qnn.batch_matmul_dequantize" == op_name) {
           BatchMatMulDequantize(nid);
+        } else if ("dnnl.qnn.batch_matmul_dequantize_divide" == op_name) {
+          BatchMatMulDequantize(nid, true);
         } else if ("dnnl.qnn.batch_matmul_requantize" == op_name) {
           BatchMatMulRequantize(nid);
         } else if ("qnn.dense" == op_name) {
@@ -335,8 +337,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           // BatchNorm(nid);
         } else if ("dnnl.qnn.softmax" == op_name){
           DNNLSoftMax(nid);
-        }
-        else {
+        } else {
           LOG(FATAL) << "Unsupported op: " << op_name;
         }
       }
@@ -1367,10 +1368,11 @@ std::tuple<
                          {DNNL_ARG_DST, dst_memory}});
   }
 
-  void BatchMatMulDequantize(const size_t& nid) {
+  void BatchMatMulDequantize(const size_t& nid, bool divide_by_8 = false) {
     // Setup attributes.
     auto node = nodes_[nid];
-    ICHECK_EQ(node.GetInputs().size(), 8);
+    auto numInputs = node.GetInputs().size();
+    ICHECK((numInputs == 8) || (numInputs == 9));
 
     auto out_shape = node.GetOpShape();
     ICHECK_EQ(out_shape.size(), 1);
@@ -1382,6 +1384,9 @@ std::tuple<
     auto deq_scale      = node.GetInputs()[6];
     auto deq_zero_point = node.GetInputs()[7];
     float deq_scale_val = get_value<float>(deq_scale);
+    if (divide_by_8) {
+      deq_scale_val /= 8.0f;
+    }
     int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
     int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
     int32_t deq_zero_point_val = get_value<int32_t>(deq_zero_point);
@@ -1401,6 +1406,8 @@ std::tuple<
     } else {
       out_dims = {out_shape[0][0], out_shape[0][1], out_shape[0][2]};
     }
+    dnnl::memory::dims bias_dims = {out_dims[1], out_dims[2]};
+    auto bias_md = dnnl::memory::desc({bias_dims, dt::f32,  tag::ab});
     // sshtin: can't use s8s8s32 or s8s8s8 with avx optimizationas because DNNL
     // cannot identify support of avx2 on AMD 5600 cores
     auto data_md   = dnnl::memory::desc({data_dims,   dt::s8,  tag::abc});
@@ -1412,21 +1419,33 @@ std::tuple<
     attr.set_output_scales(0, {deq_scale_val});
     attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
     attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
+    dnnl::matmul::desc  matmul_desc = dnnl::matmul::desc(data_md, weight_md, dst_md);
 
-    auto matmul_desc      = dnnl::matmul::desc(data_md, weight_md, dst_md);
+    if (numInputs == 9){
+      dnnl::post_ops ops;
+      ops.append_binary(dnnl::algorithm::binary_add, bias_md);
+      attr.set_post_ops(ops);
+    }
+
     auto matmul_prim_desc = dnnl::matmul::primitive_desc(matmul_desc, attr, engine_);
     auto matmul = dnnl::matmul(matmul_prim_desc);
-
     net_.push_back(matmul);
     // Memory mappings.
     auto data_memory   = BindDNNLMemory(data_entry, data_md);
     auto weight_memory = BindDNNLMemory(weight_entry, weight_md);
     JSONGraphNodeEntry out_entry(nid, 0);
     auto dst_memory = BindDNNLMemory(out_entry, dst_md);
-
-    net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                         {DNNL_ARG_WEIGHTS, weight_memory},
-                         {DNNL_ARG_DST, dst_memory}});
+    if (numInputs == 8){
+      net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                          {DNNL_ARG_WEIGHTS, weight_memory},
+                          {DNNL_ARG_DST, dst_memory}});
+    } else {
+      auto bias_memory = BindDNNLMemory(node.GetInputs()[8], bias_md);
+      net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+                          {DNNL_ARG_WEIGHTS, weight_memory},
+                          {DNNL_ARG_DST, dst_memory},
+                          {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) |DNNL_ARG_SRC_1, bias_memory}});
+    }
   }
 
   void BatchMatMulRequantize(const size_t& nid) {
@@ -1508,7 +1527,6 @@ std::tuple<
 
     internal_mem_.push_back(interm_memory);
   }
-
 
   void DenseMulDequantizeGELU(const size_t& nid, bool postop = true) {
     // Setup attributes.
@@ -1621,7 +1639,7 @@ std::tuple<
     auto weight_entry   = node.GetInputs()[1];
     auto src_zero_point = node.GetInputs()[2];
     auto dst_zero_point = node.GetInputs()[3];
-    auto dst_scale      = node.GetInputs()[5];
+    // auto dst_scale      = node.GetInputs()[5];
     auto deq_scale      = node.GetInputs()[6];
     auto deq_zero_point = node.GetInputs()[7];
 
@@ -1680,9 +1698,7 @@ std::tuple<
       {5, tag::abcde},
     };
     auto node = nodes_[nid];
-
     ICHECK_EQ(node.GetInputs().size(), 1);
-
     auto out_shape = node.GetOpShape();
     ICHECK_EQ(out_shape.size(), 1);
     auto data_entry     = node.GetInputs()[0];
@@ -1692,6 +1708,7 @@ std::tuple<
     dnnl::memory::dims data_dims = input_shape;
     dnnl::memory::dims out_dims  = out_shape[0];
     auto it = shape2Tag.find(data_dims.size());
+
     ICHECK(it != shape2Tag.end()) << "input shape should has invalid dimention.";
     auto data_md   = dnnl::memory::desc({data_dims, dt::f32, it->second});
     it = shape2Tag.find(data_dims.size());
@@ -1733,6 +1750,9 @@ std::tuple<
       N = beta_shape[1];
     }
     auto data_md  = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
+    auto gamma_md = GenDNNLMemDescByShape({2, gamma_shape[0]}, dt::f32);
+    auto beta_md  = GenDNNLMemDescByShape({2, beta_shape[0]},  dt::f32);
+
     auto out_md   = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
     auto scale_shift_md  = GenDNNLMemDescByShape({2, N},  dt::f32);
     auto batchnorm_desc = dnnl::batch_normalization_forward::desc(dnnl::prop_kind::forward_training,
@@ -1743,7 +1763,6 @@ std::tuple<
     net_.push_back(bnorm);
     // Memory mappings.
     auto data_memory  = BindDNNLMemory(input_entry, data_md);
-
     auto mean_mem      = dnnl::memory(bnorm_pd.mean_desc(), engine_);
     auto variance_mem  = dnnl::memory(bnorm_pd.variance_desc(), engine_);
     auto workspace_mem = dnnl::memory(bnorm_pd.workspace_desc(), engine_);
@@ -1766,13 +1785,13 @@ std::tuple<
       doBNPreprocess_ = true;
     }
     JSONGraphNodeEntry out_entry(nid, 0);
-    auto dst_memory = BindDNNLMemory(out_entry, out_md);
+    auto dst_memory   = BindDNNLMemory(out_entry, out_md);
+    auto gamma_memory = BindDNNLMemory(gamma_entry, gamma_md);
+    auto beta_memory  = BindDNNLMemory(beta_entry,  beta_md);
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                           {DNNL_ARG_SCALE_SHIFT, scale_shift_mem},
                           {DNNL_ARG_VARIANCE, variance_mem},
-                          {DNNL_ARG_MEAN, mean_mem},
-                          {DNNL_ARG_WORKSPACE, workspace_mem},
                           {DNNL_ARG_DST, dst_memory}});
   }
 
@@ -1801,7 +1820,7 @@ std::tuple<
     auto dst_memory = BindDNNLMemory(out_entry, out_md);
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                           {DNNL_ARG_DST, dst_memory}});
+                         {DNNL_ARG_DST, dst_memory}});
 
   }
 

@@ -1075,6 +1075,58 @@ def test_qnn_batch_matmul_reshape_dequantize():
         check_result(mod, ref_mod, {"in": data_i}, (1, IC, h, h),
                       tol=1e-10, atol=0, dtype="float32")
 
+def test_qnn_batch_matmul_reshape_dequantize_divide():
+    """
+    :return:
+    """
+
+    for h, w in (
+            (4, 8),
+            (64, 32),
+            (17, 23),
+    ):
+        dtype = "float32"
+        NB = 1
+        IC = 2
+        d_shape = (IC, h, w)
+        w_shape = (IC, h, w)
+        b_shape =(h,)
+        if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+            print("skip because DNNL codegen is not available")
+            return
+
+        data_b = np.random.uniform(-10, -10, b_shape).astype(dtype)
+        # data_b = np.zeros(b_shape).astype(dtype)
+        data_i = np.random.uniform(0, 30, d_shape).astype("int8")
+        data_w = np.random.uniform(-10, 10, w_shape).astype("int8")
+
+        in_d = relay.var("in", shape=d_shape, dtype="int8")
+        in_w = relay.const(data_w, dtype="int8")
+        in_b = relay.const(data_b, dtype=dtype)
+        in_d_zp = relay.const(0, dtype="int32")
+        in_d_sc = relay.const(0.1, dtype=dtype)
+        in_w_zp = relay.const(0, dtype="int32")
+        in_w_sc = relay.const(1.0, dtype=dtype) # the data is quantized
+        eight = relay.const(8, dtype=dtype)
+        rq_out_zp = relay.const(0, dtype="int32")
+        rq_out_sc = relay.const(0.1, dtype=dtype)
+
+        op = tvm.relay.qnn.op.batch_matmul(in_d, in_w, in_d_zp, in_w_zp, in_d_sc, in_w_sc,
+                                    out_dtype="int32")
+        op = tvm.relay.reshape(data = op, newshape=(1, IC, h, h))
+        op = tvm.relay.qnn.op.dequantize(data = op, input_scale = rq_out_sc, input_zero_point = rq_out_zp)
+        op = tvm.relay.divide(op, eight)
+        op = tvm.relay.add(op, in_b)
+        func = relay.Function([in_d], op)
+        ref_mod = tvm.IRModule.from_expr(func)
+        ref_mod = relay.transform.InferType()(ref_mod)
+        mod = partition_for_dnnl(ref_mod)
+        print(mod)
+        assert not tvm.ir.structural_equal(ref_mod, mod)
+        # # atol=1 means int values should match with +-1 tolerance
+        check_result(mod, ref_mod, {"in": data_i}, (1, IC, h, h),
+                      tol=5e-6, atol=0, dtype="float32")
+
 def test_qnn_batch_matmul_reshape_requantize():
     """
     :return:
@@ -1295,12 +1347,18 @@ def test_qnn_batchnorm():
     ):
         # pattern test for ONNX quantized BERT model
         dtype = "float32"
+        OC = 16
         d_shape = (1, h, w)
-        b_shape = (1, h, 1)
-        np.random.seed(33712)
-        data_i = np.random.normal(0.0, 1, d_shape).astype(dtype)
-        data_g = np.random.uniform(0.1, 0.5, b_shape).astype(dtype)
+        # w_shape = (OC, w)
+        b_shape = (OC,)
+        if not tvm.get_global_func("runtime.DNNLJSONRuntimeCreate", True):
+            print("skip because DNNL codegen is not available")
+            return
+        np.random.seed(7120)
+        data_i = np.random.normal(0.0, 0.2, d_shape).astype("float32")
+        # data_w = np.random.normal(0.0, 0.3, w_shape)
         data_b = np.random.uniform(0.1, 0.3, b_shape).astype(dtype)
+        data_g = np.random.uniform(0.1, 0.3, b_shape).astype(dtype)
         in_d  = relay.var("in", shape=d_shape, dtype=dtype)
         in_g  = relay.const(data_g, dtype=dtype)
         in_b  = relay.const(data_b, dtype=dtype)
@@ -1323,7 +1381,7 @@ def test_qnn_batchnorm():
         assert not tvm.ir.structural_equal(ref_mod, mod)
 
         check_result(mod, ref_mod, {"in": data_i}, d_shape,
-                      tol=1e-1, atol=0, dtype=dtype)
+                      tol=0.025, atol=0, dtype=dtype)
 
 def test_qnn_softmax():
     for h, w in (
@@ -1337,8 +1395,8 @@ def test_qnn_softmax():
         np.random.seed(371)
         data_i = np.random.normal(0.0, 0.1, d_shape).astype(dtype)
         in_d  = relay.var("in", shape=d_shape, dtype=dtype)
-        two   = relay.const(2, dtype=dtype)
-        delta = relay.const(1e-12, dtype=dtype)
+        # two   = relay.const(2, dtype=dtype)
+        # delta = relay.const(1e-12, dtype=dtype)
         mean = tvm.relay.max(in_d,  axis=[-1], keepdims=True)
         sub  = tvm.relay.subtract(in_d, mean)
         exp  = tvm.relay.exp(sub)
@@ -1353,28 +1411,48 @@ def test_qnn_softmax():
         check_result(mod, ref_mod, {"in": data_i}, d_shape,
                       tol=1e-6, atol=0, dtype=dtype)
 
-
 if __name__ == "__main__":
-    test_conv2d()
-    test_add()
-    test_relu()
-    test_dense()
-#    test_bn()
-    test_multiple_ops()
-    test_composite()
-#    test_constant()
-    test_partial_constant()
-    test_qnn_conv2d()
-    # test_qnn_conv2d_sum()
-    test_qnn_dense()
-    test_qnn_batch_matmul()
-    test_qnn_batch_matmul_reshape_dequantize()
-    test_qnn_batch_matmul_reshape_requantize()
-    test_qnn_dense_reshape_dequantize_add()
-    test_qnn_dense_reshape_dequantize_gelu()
-    test_qnn_dense_reshape_dequantize()
-    test_qnn_dense_s8s8s32()
-    # test_qnn_batchnorm()
-    test_qnn_softmax()
+#     test_conv2d()
+#     test_add()
+#     test_relu()
+#     test_dense()
+# #    test_bn()
+#     test_multiple_ops()    test_conv2d()
+#     test_add()
+#     test_relu()
+#     test_dense()
+# #    test_bn()
+#     test_multiple_ops()
+#     test_composite()
+# #    test_constant()
+#     test_partial_constant()
+#     test_qnn_conv2d()
+#     # test_qnn_conv2d_sum()
+#     test_qnn_dense()
+#     test_qnn_batch_matmul()
+#     test_qnn_batch_matmul_reshape_dequantize()
+#     test_qnn_batch_matmul_reshape_requantize()
+#     test_qnn_dense_reshape_dequantize_add()
+#     test_qnn_dense_reshape_dequantize_gelu()
+#     test_qnn_dense_reshape_dequantize()
+#     test_qnn_dense_s8s8s32()
+#     test_qnn_batchnorm()
+#     test_qnn_softmax()
 
+#     test_composite()
+# #    test_constant()
+#     test_partial_constant()
+#     test_qnn_conv2d()
+#     # test_qnn_conv2d_sum()
+    # test_qnn_dense()
+    # test_qnn_batch_matmul()
+    # test_qnn_batch_matmul_reshape_dequantize()
+    # test_qnn_batch_matmul_reshape_requantize()
+    # test_qnn_dense_reshape_dequantize_add()
+    # test_qnn_dense_reshape_dequantize_gelu()
+    # test_qnn_dense_reshape_dequantize()
+    # test_qnn_dense_s8s8s32()
+    # test_qnn_batchnorm()
+    # test_qnn_softmax()
+    test_qnn_batch_matmul_reshape_dequantize_divide()
 

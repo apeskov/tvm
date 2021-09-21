@@ -461,6 +461,9 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
       } else if ("dnnl.qnn.batch_matmul_dequantize" == name){
         call = GetRootCall(fn->body.as<CallNode>(), 2,
                            {"qnn.batch_matmul", "reshape", "qnn.dequantize"});
+      } else if ("dnnl.qnn.batch_matmul_dequantize_divide" == name){
+        call = GetRootCall(fn->body.as<CallNode>(), 4,
+                           {"qnn.batch_matmul", "reshape", "qnn.dequantize", "divide", "add"});
       } else if ("dnnl.qnn.dense_dequantize_gelu" == name){
         // call = GetRootCall(fn->body.as<CallNode>(), 3,
                           //  {"qnn.dense", "reshape", "qnn.dequantize", "add"});
@@ -478,12 +481,8 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
         call = fn->body.as<CallNode>();
       } else if ("dnnl.qnn.batchnorm" == name){
         call = fn->body.as<CallNode>();
-        // call = GetRootCall(fn->body.as<CallNode>(), 6,
-        //                     {"mean", "subtract", "power", "mean", "add", "subtract", "divide"});
       } else if ("dnnl.qnn.softmax" == name) {
         call = fn->body.as<CallNode>();
-        // call = GetRootCall(fn->body.as<CallNode>(), 4,
-        //                      {"max", "subtract", "exp", "sum", "divide"});
       }
       else {
           LOG(FATAL) << "Unrecognized DNNL pattern: " << name;

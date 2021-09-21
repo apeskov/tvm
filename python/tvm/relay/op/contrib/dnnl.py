@@ -158,6 +158,16 @@ def make_pattern_qnn_batch_matmul_reshape_dequantize():
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
     return pat
 
+def make_pattern_qnn_batch_matmul_reshape_dequantize_divide():
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("qnn.batch_matmul")(pat, weight, wildcard(), wildcard(), wildcard(), wildcard())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
+    pat = is_op("divide")(pat, is_expr(const(8, dtype="float32")))
+    pat = is_op("add")(pat, wildcard())
+    return pat
+
 def make_pattern_gelu(inpt=None):
     if inpt == None:
         inpt = wildcard()
@@ -242,6 +252,7 @@ def pattern_table():
     conv2d_qnn_pat = ("dnnl.qnn.conv2d", make_pattern_qnn_conv2d())
     dense_qnn_pat = ("dnnl.qnn.dense", make_pattern_qnn_dense())
     batch_matmul_pat = ("dnnl.qnn.batch_matmul", make_pattern_qnn_batch_matmul())
+    batch_matmul_reshape_dequantize_divide_pat = ("dnnl.qnn.batch_matmul_dequantize_divide", make_pattern_qnn_batch_matmul_reshape_dequantize_divide())
     batch_matmul_reshape_dequantize_pat = ("dnnl.qnn.batch_matmul_dequantize", make_pattern_qnn_batch_matmul_reshape_dequantize())
     dense_reshape_dequantize_gelu_pat = ("dnnl.qnn.dense_dequantize_gelu", make_pattern_qnn_dense_reshape_dequantize_gelu())
     dense_reshape_dequantize_pat = ("dnnl.qnn.dense_dequantize_add_quantize", make_pattern_qnn_dense_reshape_dequantize_add_quantize())
@@ -249,18 +260,21 @@ def pattern_table():
     gelu_pat = ("dnnl.qnn.gelu", make_pattern_gelu())
     batchnorm_pat = ("dnnl.qnn.batchnorm", make_pattern_batchnorm())
     softmax_pat   = ("dnnl.qnn.softmax", make_pattern_softmax())
+    # softmax_quantize_pat = ("dnnl.qnn.softmax_quantize", make_pattern_softmax_quantize())
     dense_dequantize_pat = ("dnnl.qnn.dense_dequantize", make_pattern_qnn_dense_reshape_dequantize())
     dnnl_patterns = [conv2d_bias_relu_pat,
                      conv2d_relu_pat,
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
                      dense_reshape_dequantize_gelu_pat,
+                     batch_matmul_reshape_dequantize_divide_pat,
                      batch_matmul_reshape_dequantize_pat,
                     #  batch_matmul_reshape_requantize_pat,
                      batch_matmul_pat,
                      dense_reshape_dequantize_pat,
                      dense_dequantize_pat,
                      #batchnorm_pat, Cannot be used with BERT model for now
+                    #  softmax_quantize_pat,
                      softmax_pat,
                      dense_qnn_pat,
                      gelu_pat

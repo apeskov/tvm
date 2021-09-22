@@ -267,7 +267,7 @@ def pattern_table():
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
                      dense_reshape_dequantize_gelu_pat,
-                     batch_matmul_reshape_dequantize_divide_pat,
+                     #batch_matmul_reshape_dequantize_divide_pat,
                      batch_matmul_reshape_dequantize_pat,
                     #  batch_matmul_reshape_requantize_pat,
                      batch_matmul_pat,

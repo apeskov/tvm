@@ -76,8 +76,6 @@ namespace CK {
         const std::string loadgen_scenario_str  = getenv_s("CK_LOADGEN_SCENARIO");
         const std::string loadgen_mode_str      = getenv_s("CK_LOADGEN_MODE");
 
-        const int num_workers                   = getenv_i("CK_NUM_WORKERS");
-
         float given_channel_means[3]{};
         float given_channel_std[3]{};
 

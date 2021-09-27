@@ -47,7 +47,7 @@ void TestTVM(Program *prg) {
     mlperf::LogSettings log_settings;
     log_settings.log_output.outdir = prg->settings->result_dir;
     log_settings.log_output.prefix_with_datetime = false;
-    log_settings.enable_trace = true;
+    log_settings.enable_trace = false;
 
     if (prg->settings->trigger_cold_run) {
         prg->ColdRun();
@@ -56,17 +56,12 @@ void TestTVM(Program *prg) {
     SystemUnderTestTVM sut(prg);
     QuerySampleLibraryTVM qsl(prg);
 
-    size_t num_threads = prg->settings->num_workers;
+    size_t num_threads = 8;
     if (ts.scenario == mlperf::TestScenario::Server && num_threads > 1) {
       ts.server_num_issue_query_threads = num_threads;
 
       for (int i = 0; i < num_threads; i++) {
-        auto thr = std::thread([prg]() {
-          for (int j = 0; j < 10; j++)
-            prg->ColdRun();
-
-          mlperf::RegisterIssueQueryThread();
-        });
+        auto thr = std::thread([]() { mlperf::RegisterIssueQueryThread(); });
         thr.detach();
       }
     }

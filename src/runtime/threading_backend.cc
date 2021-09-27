@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <thread>
+#include <atomic>
 #if defined(__linux__) || defined(__ANDROID__)
 #include <fstream>
 #include <sstream>
@@ -50,6 +51,7 @@ class ThreadGroup::Impl {
     for (int i = exclude_worker0; i < num_workers_; ++i) {
       threads_.emplace_back([worker_callback, i] { worker_callback(i); });
     }
+    impl_idx_ = total_impl_count_++;
     InitSortedOrder();
   }
   ~Impl() { Join(); }
@@ -113,13 +115,13 @@ class ThreadGroup::Impl {
 #endif
 #if defined(__linux__) || defined(__ANDROID__)
     ICHECK_GE(sorted_order_.size(), num_workers_);
-
+    unsigned cores_offset = num_workers_ * impl_idx_;
     for (unsigned i = 0; i < threads_.size(); ++i) {
       unsigned core_id;
       if (reverse) {
-        core_id = sorted_order_[sorted_order_.size() - (i + exclude_worker0) - 1];
+        core_id = sorted_order_[sorted_order_.size() - (cores_offset + i + exclude_worker0) - 1];
       } else {
-        core_id = sorted_order_[i + exclude_worker0];
+        core_id = sorted_order_[cores_offset + i + exclude_worker0];
       }
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
@@ -159,9 +161,10 @@ class ThreadGroup::Impl {
         CPU_SET(sorted_order_[sorted_order_.size() - i - 1], &cpuset);
       }
     } else {
+      unsigned cores_offset = num_workers_ * impl_idx_;
       int num_cpu_workers = std::min(MaxConcurrency(), big_count_);
       for (int i = 0; i < num_cpu_workers; ++i) {
-        CPU_SET(sorted_order_[i], &cpuset);
+        CPU_SET(sorted_order_[cores_offset + i], &cpuset);
       }
     }
 #if defined(__ANDROID__)
@@ -223,7 +226,11 @@ class ThreadGroup::Impl {
   std::vector<unsigned int> sorted_order_;
   int big_count_ = 0;
   int little_count_ = 0;
+  int impl_idx_ = 0;
+  static std::atomic<int> total_impl_count_;
 };
+
+std::atomic<int> ThreadGroup::Impl::total_impl_count_ = {0};
 
 ThreadGroup::ThreadGroup(int num_workers, std::function<void(int)> worker_callback,
                          bool exclude_worker0)

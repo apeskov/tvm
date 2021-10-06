@@ -165,7 +165,7 @@ def make_pattern_qnn_batch_matmul_reshape_dequantize_divide():
     pat = is_op("reshape")(pat)
     pat = is_op("qnn.dequantize")(pat, wildcard(), wildcard())
     pat = is_op("divide")(pat, is_expr(const(8, dtype="float32")))
-    pat = is_op("add")(pat, wildcard())
+    # pat = is_op("add")(pat, wildcard())
     return pat
 
 def make_pattern_gelu(inpt=None):
@@ -267,7 +267,7 @@ def pattern_table():
                      conv2d_qnn_sum_pat,
                      conv2d_qnn_pat,
                      dense_reshape_dequantize_gelu_pat,
-                     #batch_matmul_reshape_dequantize_divide_pat,
+                     batch_matmul_reshape_dequantize_divide_pat,
                      batch_matmul_reshape_dequantize_pat,
                     #  batch_matmul_reshape_requantize_pat,
                      batch_matmul_pat,

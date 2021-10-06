@@ -462,8 +462,8 @@ class DNNLJSONSerializer : public backend::contrib::JSONSerializer {
         call = GetRootCall(fn->body.as<CallNode>(), 2,
                            {"qnn.batch_matmul", "reshape", "qnn.dequantize"});
       } else if ("dnnl.qnn.batch_matmul_dequantize_divide" == name){
-        call = GetRootCall(fn->body.as<CallNode>(), 4,
-                           {"qnn.batch_matmul", "reshape", "qnn.dequantize", "divide", "add"});
+        call = GetRootCall(fn->body.as<CallNode>(), 3,
+                           {"qnn.batch_matmul", "reshape", "qnn.dequantize", "divide"});
       } else if ("dnnl.qnn.dense_dequantize_gelu" == name){
         // call = GetRootCall(fn->body.as<CallNode>(), 3,
                           //  {"qnn.dense", "reshape", "qnn.dequantize", "add"});

@@ -1390,7 +1390,10 @@ std::tuple<
     int32_t src_zero_point_val = get_value<int32_t>(src_zero_point);
     int32_t dst_zero_point_val = get_value<int32_t>(dst_zero_point);
     int32_t deq_zero_point_val = get_value<int32_t>(deq_zero_point);
-
+    // assymetric case was not validated for this pattern
+    ICHECK_EQ(src_zero_point_val, 0);
+    ICHECK_EQ(dst_zero_point_val, 0);
+    ICHECK_EQ(deq_zero_point_val, 0);
     dnnl::memory::dims input_shape = nodes_[data_entry.id_].GetOpShape()[data_entry.index_];
     dnnl::memory::dims weight_shape = nodes_[weight_entry.id_].GetOpShape()[weight_entry.index_];
 
@@ -1406,9 +1409,8 @@ std::tuple<
     } else {
       out_dims = {out_shape[0][0], out_shape[0][1], out_shape[0][2]};
     }
-    dnnl::memory::dims bias_dims = {out_dims[1], out_dims[2]};
-    auto bias_md = dnnl::memory::desc({bias_dims, dt::f32,  tag::ab});
-    // sshtin: can't use s8s8s32 or s8s8s8 with avx optimizationas because DNNL
+    // auto bias_md = dnnl::memory::desc({bias_dims, dt::f32,  tag::ab});
+    // sshtin: can't use s8s8s32 or s8s8s8 with avx optimization   because DNNL
     // cannot identify support of avx2 on AMD 5600 cores
     auto data_md   = dnnl::memory::desc({data_dims,   dt::s8,  tag::abc});
     auto weight_md = dnnl::memory::desc({weight_dims, dt::s8,  tag::acb});
@@ -1421,11 +1423,11 @@ std::tuple<
     attr.set_zero_points(DNNL_ARG_SRC, 0, {src_zero_point_val});
     dnnl::matmul::desc  matmul_desc = dnnl::matmul::desc(data_md, weight_md, dst_md);
 
-    if (numInputs == 9){
-      dnnl::post_ops ops;
-      ops.append_binary(dnnl::algorithm::binary_add, bias_md);
-      attr.set_post_ops(ops);
-    }
+    // if (numInputs == 9){
+    //   dnnl::post_ops ops;
+    //   ops.append_binary(dnnl::algorithm::binary_add, bias_md);
+    //   attr.set_post_ops(ops);
+    // }
 
     auto matmul_prim_desc = dnnl::matmul::primitive_desc(matmul_desc, attr, engine_);
     auto matmul = dnnl::matmul(matmul_prim_desc);
@@ -1435,17 +1437,17 @@ std::tuple<
     auto weight_memory = BindDNNLMemory(weight_entry, weight_md);
     JSONGraphNodeEntry out_entry(nid, 0);
     auto dst_memory = BindDNNLMemory(out_entry, dst_md);
-    if (numInputs == 8){
+    // if (numInputs == 8){
       net_args_.push_back({{DNNL_ARG_SRC, data_memory},
                           {DNNL_ARG_WEIGHTS, weight_memory},
                           {DNNL_ARG_DST, dst_memory}});
-    } else {
-      auto bias_memory = BindDNNLMemory(node.GetInputs()[8], bias_md);
-      net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                          {DNNL_ARG_WEIGHTS, weight_memory},
-                          {DNNL_ARG_DST, dst_memory},
-                          {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) |DNNL_ARG_SRC_1, bias_memory}});
-    }
+    // } else {
+    //   auto bias_memory = BindDNNLMemory(node.GetInputs()[8], bias_md);
+    //   net_args_.push_back({{DNNL_ARG_SRC, data_memory},
+    //                       {DNNL_ARG_WEIGHTS, weight_memory},
+    //                       {DNNL_ARG_DST, dst_memory},
+    //                       {DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) |DNNL_ARG_SRC_1, bias_memory}});
+    // }
   }
 
   void BatchMatMulRequantize(const size_t& nid) {
@@ -1577,7 +1579,7 @@ std::tuple<
     attr.set_zero_points(DNNL_ARG_DST, 0, {dst_zero_point_val});
     dnnl::post_ops ops;
     if (postop) {
-      ops.append_eltwise(1.f, dnnl::algorithm::eltwise_gelu_erf, 1.f, 0.f);
+      ops.append_eltwise(1.f, dnnl::algorithm::eltwise_gelu, 1.f, 0.f);
     }
     ops.append_eltwise(1.0f, dnnl::algorithm::eltwise_linear, (1.0f / output_scale_val), (float)output_zero_point_val);
     attr.set_post_ops(ops);

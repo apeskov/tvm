@@ -277,7 +277,8 @@ def pattern_table():
                     #  softmax_quantize_pat,
                      softmax_pat,
                      dense_qnn_pat,
-                     gelu_pat
+                     gelu_pat,
+                     batchnorm_pat
                     ]
     return dnnl_patterns
 

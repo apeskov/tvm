@@ -1743,35 +1743,33 @@ std::tuple<
     auto beta_entry  = node.GetInputs()[3];
     float delta_val  = get_value<float>(delta_entry);
     auto out_shape   = node.GetOpShape();
-
     dnnl::memory::dims input_shape = nodes_[input_entry.id_].GetOpShape()[input_entry.index_];
     dnnl::memory::dims gamma_shape = nodes_[gamma_entry.id_].GetOpShape()[gamma_entry.index_];
     dnnl::memory::dims beta_shape  = nodes_[beta_entry.id_].GetOpShape()[beta_entry.index_];
+
     int N = beta_shape[0];
     if (beta_shape.size() == 3) {
       N = beta_shape[1];
     }
-    auto data_md  = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
+    auto data_md  = GenDNNLMemDescByShape({input_shape[0], input_shape[1], input_shape[2]}, dt::f32);
     auto gamma_md = GenDNNLMemDescByShape({2, gamma_shape[0]}, dt::f32);
     auto beta_md  = GenDNNLMemDescByShape({2, beta_shape[0]},  dt::f32);
-
-    auto out_md   = GenDNNLMemDescByShape({1, input_shape[1], input_shape[2], input_shape[0]}, dt::f32);
+    auto out_md   = GenDNNLMemDescByShape({input_shape[0], input_shape[1], input_shape[2]}, dt::f32);
     auto scale_shift_md  = GenDNNLMemDescByShape({2, N},  dt::f32);
-    auto batchnorm_desc = dnnl::batch_normalization_forward::desc(dnnl::prop_kind::forward_training,
+    auto layer_norm_desc = dnnl::layer_normalization_forward::desc(dnnl::prop_kind::forward_inference,
                                           data_md, delta_val,
-                                          dnnl::normalization_flags::use_scale_shift);
-    auto bnorm_pd = dnnl::batch_normalization_forward::primitive_desc(batchnorm_desc, engine_);
-    auto bnorm = dnnl::batch_normalization_forward(bnorm_pd);
-    net_.push_back(bnorm);
+                                          dnnl::normalization_flags::use_scale_shift
+                                          );
+    auto l_norm_pd = dnnl::layer_normalization_forward::primitive_desc(layer_norm_desc, engine_);
+    auto l_norm = dnnl::layer_normalization_forward(l_norm_pd);
+    net_.push_back(l_norm);
     // Memory mappings.
     auto data_memory  = BindDNNLMemory(input_entry, data_md);
-    auto mean_mem      = dnnl::memory(bnorm_pd.mean_desc(), engine_);
-    auto variance_mem  = dnnl::memory(bnorm_pd.variance_desc(), engine_);
-    auto workspace_mem = dnnl::memory(bnorm_pd.workspace_desc(), engine_);
+    auto mean_mem      = dnnl::memory(l_norm_pd.mean_desc(),      engine_);
+    auto variance_mem  = dnnl::memory(l_norm_pd.variance_desc(),  engine_);
     auto scale_shift_mem = dnnl::memory(scale_shift_md, engine_);
     internal_mem_.push_back(mean_mem);
     internal_mem_.push_back(variance_mem);
-    internal_mem_.push_back(workspace_mem);
     internal_mem_.push_back(scale_shift_mem);
     auto eid = EntryID(gamma_entry);
     auto dl_tensor = data_entry_[eid];
@@ -1780,7 +1778,7 @@ std::tuple<
       auto shift_vals = get_values<float>(beta_entry,  N);
       float* pDst = static_cast<float*>(scale_shift_mem.get_data_handle());
       for (int i = 0; i < N; ++i) {
-        pDst[i]     = scale_vals[i];
+        pDst[i + 0] = scale_vals[i];
         pDst[i + N] = shift_vals[i];
       }
     } else {
@@ -1792,9 +1790,11 @@ std::tuple<
     auto beta_memory  = BindDNNLMemory(beta_entry,  beta_md);
 
     net_args_.push_back({{DNNL_ARG_SRC, data_memory},
-                          {DNNL_ARG_SCALE_SHIFT, scale_shift_mem},
-                          {DNNL_ARG_VARIANCE, variance_mem},
-                          {DNNL_ARG_DST, dst_memory}});
+                         {DNNL_ARG_SCALE_SHIFT, scale_shift_mem},
+                         {DNNL_ARG_VARIANCE, beta_memory},
+                         {DNNL_ARG_MEAN, gamma_memory},
+                         {DNNL_ARG_DST, dst_memory},
+                        });
   }
 
   void DNNLSoftMax(const size_t& nid) {

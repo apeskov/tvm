@@ -37,8 +37,9 @@ import logging
 import tvm.ir
 from tvm.relay import transform
 from tvm.relay.build_module import bind_params_by_name
+from tvm.relay.expr import const
 
-from ...dataflow_pattern import wildcard, is_op, is_constant
+from ...dataflow_pattern import wildcard, is_op, is_constant, is_expr
 from .register import register_pattern_table
 
 
@@ -73,6 +74,10 @@ def _register_external_op_helper(op_name, supported=True):
 
     @tvm.ir.register_op_attr(op_name, "target.dnnl")
     def _func_wrapper(expr):
+        args = expr.args
+        if any([x.checked_type.dtype == "int64" for x in args]):
+            logger.info("DNNL does not support int64.")
+            return False
         return supported
 
     return _func_wrapper
@@ -84,8 +89,8 @@ _register_external_op_helper("nn.dense")
 _register_external_op_helper("nn.relu")
 _register_external_op_helper("tanh")
 _register_external_op_helper("sigmoid")
-_register_external_op_helper("add")
-_register_external_op_helper("multiply")
+#_register_external_op_helper("add")
+#_register_external_op_helper("multiply")
 
 
 def make_conv_pattern(with_bias=True, with_eltwise=None):
@@ -255,6 +260,60 @@ def make_qnn_dense_pattern(with_sum=False):
     return pat_name, pat
 
 
+def make_pattern_qnn_dense_reshape_dequantize(with_gelu=False):
+    pat = wildcard()
+    weight = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, is_constant(), is_constant(), is_constant(), is_constant())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, is_constant(), is_constant())
+    pat = is_op("add")(pat, is_constant())
+    if with_gelu is True:
+        div = is_op("divide")(pat, is_constant())
+        erf = is_op("erf")(div)
+        mul = is_op("multiply")(pat, is_expr(const(0.5, dtype="float32")))
+        pat = is_op("add")(erf, is_expr(const(1.0, dtype="float32")))
+        pat = is_op("multiply")(mul, pat)
+    pat = is_op("qnn.quantize")(pat, is_constant(), is_constant())
+    pat_name = "dnnl.qnn.dense_dequantize"
+    return pat_name, pat
+
+
+def make_pattern_qnn_dense_add_req():
+    pat = wildcard()
+    weight = wildcard()
+    bias = wildcard()
+    pat = is_op("qnn.dense")(pat, weight, is_constant(), is_constant(), is_constant(), is_constant())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.add")(pat, bias, is_constant(), is_constant(), is_constant(), is_constant(), is_constant(), is_constant())
+    pat = is_op("reshape")(pat) | pat
+    pat = is_op("qnn.requantize")(pat, is_constant(), is_constant(), is_constant(), is_constant())
+    pat_name = "dnnl.qnn.dense_add_req"
+    return pat_name, pat
+
+
+def make_pattern_qnn_matmul_req():
+    pat = wildcard()
+    weight = is_op("transpose")(wildcard())
+    pat = is_op("qnn.batch_matmul")(pat, weight, is_constant(), is_constant(), is_constant(), is_constant())
+    pat = is_op("qnn.requantize")(pat, is_constant(), is_constant(), is_constant(), is_constant())
+    pat_name = "dnnl.qnn.matmul_req"
+    return pat_name, pat
+
+
+def make_pattern_qnn_matmul_reshape_dequantize(with_div):
+    pat = wildcard()
+    weight = is_op("transpose")(wildcard())
+    pat = is_op("qnn.batch_matmul")(pat, weight, is_constant(), is_constant(), is_constant(), is_constant())
+    pat = is_op("reshape")(pat)
+    pat = is_op("qnn.dequantize")(pat, is_constant(), is_constant())
+    if with_div is True:
+        pat = is_op("divide")(pat, is_constant())
+
+    pat_name = "dnnl.qnn.matmul_dequantize_div" if with_div else "dnnl.qnn.matmul_dequantize"
+
+    return pat_name, pat
+
+
 @register_pattern_table("dnnl")
 def pattern_table():
     """Create dnnl patterns.
@@ -278,6 +337,12 @@ def pattern_table():
         # Old dnnl version doesn't support per channel o_scale
         if dnnl_version >= (2, 2) or not with_sum:
             dnnl_patterns.append(make_qnn_dense_pattern(with_sum))
+
+    dnnl_patterns.append(make_pattern_qnn_dense_reshape_dequantize(True))
+    dnnl_patterns.append(make_pattern_qnn_dense_add_req())
+    dnnl_patterns.append(make_pattern_qnn_matmul_req())
+    for with_div in [True, False]:
+        dnnl_patterns.append(make_pattern_qnn_matmul_reshape_dequantize(with_div))
 
     return dnnl_patterns
 

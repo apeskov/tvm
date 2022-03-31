@@ -371,6 +371,167 @@ KernelRequisites parseBaseOpComposite(const FunctionNode* fn, const std::string&
   return {inputs, attrs};
 }
 
+KernelRequisites parseQnnDenseDeqComposite(const FunctionNode* fn,
+                                           bool act) {
+  OpSeq ops;
+  ops(fn->body);
+
+  std::vector<std::string> qnn_dense_deq_pat{"qnn.dense", "reshape",
+                                             "qnn.dequantize"},
+                           qnn_dense_deq_add_pat{"qnn.dense", "reshape",
+                                                 "qnn.dequantize", "add"},
+                           qnn_dense_gelu_pat{"qnn.dense", "reshape",
+                                              "qnn.dequantize", "add",
+                                              "multiply", "divide", "erf",
+                                              "add", "multiply", "qnn.quantize"};
+  auto layer_names = ops.getOpNames();
+  ICHECK(layer_names == qnn_dense_deq_pat || layer_names == qnn_dense_deq_add_pat ||
+         layer_names == qnn_dense_gelu_pat)
+      << "Unsupported pattern for DNNL code generator. Looks like some discrepancy "
+         "between DNNL partitioner pass and code generator.";
+
+  using namespace tensor_arithmetic;
+
+  auto dense = ops.getOpLayer("qnn.dense");
+  //auto reshape = ops.getOpLayer("reshape");
+  auto deq = ops.getOpLayer("qnn.dequantize");
+  auto bs = ops.getOpLayer("add");
+  auto quantize = ops.getOpLayer("qnn.quantize");
+
+  auto data = dense.extern_args_[0];
+  auto wgh = dense.extern_args_[1];
+  auto bias = bs ? legalizeBiasShape(bs.extern_args_[0]) : Expr{};
+
+  auto attrs = extractAttrs(dense.call_node_);  // extract original attrs
+  std::vector<Expr> inputs = {data, wgh};       // args with fixed positions
+
+  attrs["src_zp_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(dense.extern_args_[2]);
+
+  attrs["dst_zp_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(deq.extern_args_[1]);
+
+  attrs["deq_scale_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(deq.extern_args_[0]);
+
+  if (bs) {
+    attrs["bias_idx"] = dmlc_attr(inputs.size());
+    auto bias = bs.extern_args_[0] / deq.extern_args_[0];
+    inputs.push_back(EvalExpr(bias));
+    //inputs.push_back(bs.extern_args_[0]);
+  }
+
+  if (act) {
+    std::vector<std::string> act_attr = {"gelu_erf"};
+    act_attr.push_back(std::to_string(inputs.size()));
+    inputs.push_back(InferType(constant(1.0f)));
+    act_attr.push_back(std::to_string(inputs.size()));
+    inputs.push_back(InferType(constant(1.0f)));
+    act_attr.push_back(std::to_string(inputs.size()));
+    inputs.push_back(InferType(constant(0.0f)));
+
+    attrs["activation"] = dmlc_attr(act_attr);
+  }
+
+  if (quantize) {
+    attrs["q_scale_idx"] = dmlc_attr(inputs.size());
+    inputs.push_back(quantize.extern_args_[0]);
+
+    attrs["q_zp_idx"] = dmlc_attr(inputs.size());
+    inputs.push_back(quantize.extern_args_[1]);
+  }
+
+  return {inputs, attrs};
+}
+
+KernelRequisites parseQnnDenseQnnAddComposite(const FunctionNode* fn) {
+  OpSeq ops;
+  ops(fn->body);
+
+  std::vector<std::string> qnn_dense_add_req_pat1{"qnn.dense", "reshape", "qnn.add", "qnn.requantize"},
+                           qnn_dense_add_req_pat2{"qnn.dense", "reshape", "qnn.add", "reshape", "qnn.requantize"};
+
+  auto layer_names = ops.getOpNames();
+  ICHECK(layer_names == qnn_dense_add_req_pat1 || layer_names == qnn_dense_add_req_pat2)
+      << "Unsupported patter for DNNL code generator. Looks like some discrepancy "
+         "between DNNL partitioner pass and code generator.";;
+
+  using namespace tensor_arithmetic;
+
+  auto dense = ops.getOpLayer("qnn.dense");
+  auto add = ops.getOpLayer("qnn.add");
+  auto rq = ops.getOpLayer("qnn.requantize");
+
+  auto data = dense.extern_args_[0];
+  auto wgh = dense.extern_args_[1];
+  auto bias = add.extern_args_[0];
+
+  auto attrs = extractAttrs(dense.call_node_);  // extract original attrs
+  std::vector<Expr> inputs = {data, wgh, bias};       // args with fixed positions
+
+  // out_scale = rq.in_scale / rq.out_scale
+  Expr o_scl = rq.extern_args_[0] / rq.extern_args_[2];
+  attrs["o_scl_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(collapse_to_scalar(EvalExpr(o_scl)));
+  
+
+  return {inputs, attrs};
+}
+
+KernelRequisites parseQnnMatmulDqRqComposite(const FunctionNode* fn) {
+  OpSeq ops;
+  ops(fn->body);
+
+  std::vector<std::string> qnn_matmul_req_pat{"transpose", "qnn.batch_matmul",
+                                              "qnn.requantize"},
+                           qnn_matmul_deq_pat{"transpose", "qnn.batch_matmul",
+                                              "reshape", "qnn.dequantize"},
+                           qnn_matmul_deq_div_pat{"transpose", "qnn.batch_matmul",
+                                                  "reshape", "qnn.dequantize",
+                                                  "divide"};
+
+  auto layer_names = ops.getOpNames();
+  ICHECK(layer_names == qnn_matmul_req_pat || layer_names == qnn_matmul_deq_pat ||
+         layer_names == qnn_matmul_deq_div_pat)
+      << "Unsupported pattern for DNNL code generator. Looks like some discrepancy "
+         "between DNNL partitioner pass and code generator.";
+  
+  using namespace tensor_arithmetic;
+
+  auto transpose = ops.getOpLayer("transpose");
+  auto matmul = ops.getOpLayer("qnn.batch_matmul");
+  auto deq = ops.getOpLayer("qnn.dequantize");
+  auto rq  = ops.getOpLayer("qnn.requantize");
+  auto div = ops.getOpLayer("divide");
+
+  // unsupported case: requantize and dequantize can not coexist.
+  ICHECK((deq && !rq) || (!deq && rq));
+
+  auto data = matmul.extern_args_[0];
+  auto wgh  = transpose.extern_args_[0];
+
+  auto attrs = extractAttrs(matmul.call_node_);  // extract original attrs
+  std::vector<Expr> inputs = {data, wgh};        // args with fixed positions
+
+  Expr o_scale;
+  if (rq) {
+    // out_scale = rq.in_scale / rq.out_scale
+    o_scale = rq.extern_args_[0] / rq.extern_args_[2];
+  } else {
+    // Just for check.
+    ICHECK(is_const(deq.extern_args_[0]) && is_scalar(deq.extern_args_[0]));
+    if (div)
+      ICHECK(is_const(div.extern_args_[0]) && is_scalar(div.extern_args_[0]));
+
+    o_scale = (div) ? deq.extern_args_[0] / div.extern_args_[0]
+                    : deq.extern_args_[0];
+  }
+  attrs["o_scale_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(collapse_to_scalar(EvalExpr(o_scale)));
+
+  return {inputs, attrs};
+}
+
 KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
   auto comp = fn->GetAttr<String>(attr::kComposite);
   ICHECK(comp.defined());
@@ -390,6 +551,19 @@ KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
              name == "dnnl.dense_relu" || name == "dnnl.dense_tanh" ||
              name == "dnnl.dense_sigmoid") {
     return parseBaseOpComposite(fn, "nn.dense");
+  } else if (name == "dnnl.qnn.dense_dequantize") {
+    return parseQnnDenseDeqComposite(fn, true);
+  } else if (name == "dnnl.qnn.dense_add_req") {
+    return parseQnnDenseQnnAddComposite(fn);
+  //} else if (name == "dnnl.qnn.matmul_dequantize" ||
+  //           name == "dnnl.qnn.matmul_dequantize_div") {
+  //  return parseQnnMatmulDeqComposite(fn);
+  //} else if (name == "dnnl.qnn.matmul_req") {
+  //  return parseQnnMatmulReqComposite(fn);
+  } else if (name == "dnnl.qnn.matmul_req" ||
+             name == "dnnl.qnn.matmul_dequantize" ||
+             name == "dnnl.qnn.matmul_dequantize_div") {
+    return parseQnnMatmulDqRqComposite(fn);
   } else {
     LOG(FATAL) << "Unknown composite function " << name;
   }

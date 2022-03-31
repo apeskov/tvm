@@ -126,6 +126,8 @@ dnnl::algorithm convert2dnnl_activation(std::string name) {
     return dnnl::algorithm::eltwise_clip;
   else if (name == "gelu")
     return dnnl::algorithm::eltwise_gelu;
+  else if (name == "gelu_erf")
+    return dnnl::algorithm::eltwise_gelu_erf;
   else if (name == "tanh")
     return dnnl::algorithm::eltwise_tanh;
   else if (name == "sqrt")
@@ -297,6 +299,17 @@ class TensorRequisite {
     auto orig = std::make_shared<TensorRequisite>(*this);
     // Recreate tensor desc with layout 'any'
     dnnl::memory::desc any_desc{t_desc_.dims(), t_desc_.data_type(), dnnl::memory::format_tag::any};
+    return {any_desc, orig, false, {}, INVALID_EID, reverse_data_flow_};
+  }
+
+  /**
+   * Produce tensor with AB layout
+   * Cannot be registered in TensorRegistry. Only for querying DNNL for preferred layouts.
+   */
+  TensorRequisite layoutAB() const {
+    auto orig = std::make_shared<TensorRequisite>(*this);
+    // Recreate tensor desc with layout 'any'
+    dnnl::memory::desc any_desc{t_desc_.dims(), t_desc_.data_type(), dnnl::memory::format_tag::ab};
     return {any_desc, orig, false, {}, INVALID_EID, reverse_data_flow_};
   }
 
@@ -753,12 +766,29 @@ class NodeHelper {
 
     dnnl::memory mem = {};
     if (dl_tensor) {
+      /*std::cout << "Here!!!!" << std::endl;
+      const float* pSrc = static_cast<float*>(dl_tensor->data);
+      std::cout << shape.size() << std::endl;
+      if(shape.size()) {
+        std::cout << "dim=" << shape[0] << std::endl;
+        for (int i = 0; i < shape[0]; ++i) {
+          std::cout << pSrc[i] << " ";
+        }
+      }
+      std::cout << std::endl;*/
+
+
       eid = TensorRequisite::INVALID_EID;
       mem = utils::convert2dnnl(dl_tensor, graph_explorer_.engine_);
       ICHECK(mem.get_desc() == desc);
     }
 
     return {desc, nullptr, false, mem, eid, false};
+  }
+
+  TensorRequisite getInputByAttrName(const std::string& name) {
+    auto idx = getAttr<int>(name, {"-1"});
+    return getInput(idx);
   }
 
   TensorRequisite getOutput(int idx) {

@@ -236,6 +236,10 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
                    "dnnl.qnn.matmul_dequantize_div" == op_name ||
                    "dnnl.qnn.matmul_req" == op_name) {
           QnnMatmul(nid);
+        } else if ("dnnl.layer.normalize" == op_name) {
+          LayerNorm(nid);
+        } else if ("nn.softmax" == op_name) {
+          Softmax(nid);
         } else if ("nn.batch_norm" == op_name) {
           BatchNorm(nid);
         } else if ("nn.relu" == op_name) {
@@ -244,6 +248,8 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           Eltwise(nid, dnnl::algorithm::eltwise_tanh);
         } else if ("sigmoid" == op_name) {
           Eltwise(nid, dnnl::algorithm::eltwise_logistic);
+        } else if ("sqrt" == op_name) {
+          Eltwise(nid, dnnl::algorithm::eltwise_sqrt);
         } else if ("add" == op_name) {
           Binary(nid, dnnl::algorithm::binary_add);
         } else if ("multiply" == op_name) {
@@ -516,11 +522,11 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     // Dense description.
     auto dense_d = (bias_tr) ? dnnl::inner_product_forward::desc(
                                     dnnl::prop_kind::forward_inference, src_tr.layoutAny().desc(),
-                                    wgh_tr.layoutAB().desc(), bias_tr.layoutAny().desc(),
+                                    wgh_tr.layoutAny().desc(), bias_tr.layoutAny().desc(),
                                     dst_tr_2d.layoutAny().desc())
                              : dnnl::inner_product_forward::desc(
                                     dnnl::prop_kind::forward_inference, src_tr.layoutAny().desc(),
-                                    wgh_tr.layoutAB().desc(), dst_tr_2d.layoutAny().desc());
+                                    wgh_tr.layoutAny().desc(), dst_tr_2d.layoutAny().desc());
     auto dense_pd = dnnl::inner_product_forward::primitive_desc(dense_d, attr, engine_);
     auto dense = dnnl::inner_product_forward(dense_pd);
 
@@ -565,7 +571,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     // Dense description.
     auto dense_d = dnnl::inner_product_forward::desc(
         dnnl::prop_kind::forward_inference,
-        src_tr.layoutAny().desc(), wgh_tr.layoutAB().desc(),
+        src_tr.layoutAny().desc(), wgh_tr.layoutAny().desc(),
         bias_tr.layoutAny().desc(), dst_tr_2d.layoutAny().desc());
     auto dense_pd = dnnl::inner_product_forward::primitive_desc(dense_d, attr, engine_);
     auto dense = dnnl::inner_product_forward(dense_pd);
@@ -679,6 +685,43 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
                 {DNNL_ARG_VARIANCE, variance_tr}});
   }
 
+  void LayerNorm(const uint32_t& nid) {
+    auto node = NodeHelper{nid, g_explorer_};
+
+    auto data_tr = node.getInput(0);
+    auto dst_tr = node.getOutput(0);
+
+    auto e_tr = node.getInputByAttrName("epsilon_idx");
+    auto epsilon = e_tr.getConstScalarData<float>();
+
+    auto scale_tr = node.getInputByAttrName("scale_idx");
+    auto shift_tr = node.getInputByAttrName("shift_idx");
+
+    // Just for check
+    ICHECK_EQ(node.getAttr<int>("axis"), -1);
+
+    auto layer_norm_desc = dnnl::layer_normalization_forward::desc(
+            dnnl::prop_kind::forward_inference, data_tr.desc(), epsilon,
+            dnnl::normalization_flags::use_scale | dnnl::normalization_flags::use_shift);
+    auto l_norm_pd = dnnl::layer_normalization_forward::primitive_desc(layer_norm_desc, engine_);
+    auto l_norm = dnnl::layer_normalization_forward(l_norm_pd);
+
+    data_tr = data_tr.requestLayout(l_norm_pd.src_desc());
+    dst_tr = dst_tr.requestLayout(l_norm_pd.dst_desc());
+
+    auto mean_tr = node.makeTemp(l_norm_pd.mean_desc(),
+                                 g_explorer_.generateUniqueEID());
+    auto variance_tr = node.makeTemp(l_norm_pd.variance_desc(),
+                                     g_explorer_.generateUniqueEID());
+
+    submit(l_norm, {{DNNL_ARG_SRC, data_tr},
+                    {DNNL_ARG_DST, dst_tr},
+                    {DNNL_ARG_SCALE, scale_tr},
+                    {DNNL_ARG_SHIFT, shift_tr},
+                    {DNNL_ARG_MEAN, mean_tr},
+                    {DNNL_ARG_VARIANCE, variance_tr}});
+  }
+
   void Eltwise(const uint32_t& nid, dnnl::algorithm algo) {
     auto node = NodeHelper{nid, g_explorer_};
 
@@ -717,6 +760,24 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     out_tr = out_tr.requestLayout(binary_pd.dst_desc());
 
     submit(binary, {{DNNL_ARG_SRC_0, lhs_tr}, {DNNL_ARG_SRC_1, rhs_tr}, {DNNL_ARG_DST, out_tr}});
+  }
+
+  void Softmax(const uint32_t& nid) {
+    auto node = NodeHelper{nid, g_explorer_};
+
+    auto src_tr = node.getInput(0);
+    auto dst_tr = node.getOutput(0);
+
+    // Matmul description.
+    auto softmax_d = dnnl::softmax_forward::desc(dnnl::prop_kind::forward_inference,
+                                                 src_tr.desc(), 3);
+    auto softmax_pd = dnnl::softmax_forward::primitive_desc(softmax_d, engine_);
+    auto softmax = dnnl::softmax_forward(softmax_pd);
+
+    src_tr = src_tr.requestLayout(softmax_pd.src_desc());
+    dst_tr = dst_tr.requestLayout(softmax_pd.dst_desc());
+
+    submit(softmax, {{DNNL_ARG_SRC, src_tr}, {DNNL_ARG_DST, dst_tr}});
   }
 
   /** The dnnl engine. */

@@ -87,8 +87,10 @@ _register_external_op_helper("nn.batch_norm")
 _register_external_op_helper("nn.conv2d")
 _register_external_op_helper("nn.dense")
 _register_external_op_helper("nn.relu")
+_register_external_op_helper("nn.softmax")
 _register_external_op_helper("tanh")
 _register_external_op_helper("sigmoid")
+_register_external_op_helper("sqrt")
 #_register_external_op_helper("add")
 #_register_external_op_helper("multiply")
 
@@ -314,6 +316,21 @@ def make_pattern_qnn_matmul_reshape_dequantize(with_div):
     return pat_name, pat
 
 
+def make_pattern_normalization():
+    pat  = wildcard()
+    mean = is_op("mean")(pat)
+    subt = is_op("subtract")(pat, mean)
+    pow  = is_op("power")(subt, is_expr(const(2, dtype="float32")))
+    pat  = is_op("mean")(pow)
+    pat  = is_op("add")(pat, is_constant())
+    pat  = is_op("sqrt")(pat)
+    pat  = is_op("divide")(subt, pat)
+    pat  = is_op("multiply")(pat, is_constant())
+    pat  = is_op("add")(pat, is_constant())
+    pat_name = "dnnl.layer.normalize"
+    return pat_name, pat
+
+
 @register_pattern_table("dnnl")
 def pattern_table():
     """Create dnnl patterns.
@@ -343,6 +360,8 @@ def pattern_table():
     dnnl_patterns.append(make_pattern_qnn_matmul_req())
     for with_div in [True, False]:
         dnnl_patterns.append(make_pattern_qnn_matmul_reshape_dequantize(with_div))
+    if dnnl_version >= (2, 5):
+        dnnl_patterns.append(make_pattern_normalization())
 
     return dnnl_patterns
 

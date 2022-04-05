@@ -532,6 +532,40 @@ KernelRequisites parseQnnMatmulDqRqComposite(const FunctionNode* fn) {
   return {inputs, attrs};
 }
 
+KernelRequisites parseNormalization(const FunctionNode* fn) {
+  OpSeq ops;
+  ops(fn->body);
+
+  std::vector<std::string> norm_pat
+  {"mean", "subtract", "power", "mean", "add", "sqrt", "divide", "multiply", "add"};
+
+  auto layer_names = ops.getOpNames();
+  ICHECK(layer_names == norm_pat)
+      << "Unsupported pattern for DNNL code generator. Looks like some discrepancy "
+         "between DNNL partitioner pass and code generator.";
+
+  auto mean = ops.getOpLayer("mean");
+  auto add_1 = ops.getOpLayer("add");
+  auto mul = ops.getOpLayer("multiply");
+  auto add_2 = ops.getLastOpLayer("add");
+
+  auto data = mean.extern_args_[0];
+
+  std::vector<Expr> inputs = {data};        // args with fixed positions
+  auto attrs = extractAttrs(mean.call_node_);
+
+  attrs["epsilon_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(add_1.extern_args_[0]);
+
+  attrs["scale_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(mul.extern_args_[0]);
+
+  attrs["shift_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(add_2.extern_args_[0]);
+
+  return {inputs, attrs};
+}
+
 KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
   auto comp = fn->GetAttr<String>(attr::kComposite);
   ICHECK(comp.defined());
@@ -555,15 +589,12 @@ KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
     return parseQnnDenseDeqComposite(fn, true);
   } else if (name == "dnnl.qnn.dense_add_req") {
     return parseQnnDenseQnnAddComposite(fn);
-  //} else if (name == "dnnl.qnn.matmul_dequantize" ||
-  //           name == "dnnl.qnn.matmul_dequantize_div") {
-  //  return parseQnnMatmulDeqComposite(fn);
-  //} else if (name == "dnnl.qnn.matmul_req") {
-  //  return parseQnnMatmulReqComposite(fn);
   } else if (name == "dnnl.qnn.matmul_req" ||
              name == "dnnl.qnn.matmul_dequantize" ||
              name == "dnnl.qnn.matmul_dequantize_div") {
     return parseQnnMatmulDqRqComposite(fn);
+  } else if (name == "dnnl.layer.normalize") {
+    return parseNormalization(fn);
   } else {
     LOG(FATAL) << "Unknown composite function " << name;
   }

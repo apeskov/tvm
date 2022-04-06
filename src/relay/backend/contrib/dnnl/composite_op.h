@@ -566,6 +566,34 @@ KernelRequisites parseNormalization(const FunctionNode* fn) {
   return {inputs, attrs};
 }
 
+
+KernelRequisites parseSoftmaxQuantize(const FunctionNode* fn) {
+  OpSeq ops;
+  ops(fn->body);
+
+  std::vector<std::string> pat{"nn.softmax", "qnn.quantize"};
+
+  auto layer_names = ops.getOpNames();
+  ICHECK(layer_names == pat)
+      << "Unsupported pattern for DNNL code generator. Looks like some discrepancy "
+         "between DNNL partitioner pass and code generator.";
+
+  auto softmax = ops.getOpLayer("nn.softmax");
+  auto quantize = ops.getOpLayer("qnn.quantize");
+
+  auto data = softmax.extern_args_[0];
+  std::vector<Expr> inputs = {data};        // args with fixed positions
+  auto attrs = extractAttrs(softmax.call_node_);
+
+  attrs["q_scale_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(quantize.extern_args_[0]);
+
+  attrs["q_zp_idx"] = dmlc_attr(inputs.size());
+  inputs.push_back(quantize.extern_args_[1]);
+
+  return {inputs, attrs};
+}
+
 KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
   auto comp = fn->GetAttr<String>(attr::kComposite);
   ICHECK(comp.defined());
@@ -595,6 +623,8 @@ KernelRequisites DNNLCompositeFunctionsParser(const FunctionNode* fn) {
     return parseQnnMatmulDqRqComposite(fn);
   } else if (name == "dnnl.layer.normalize") {
     return parseNormalization(fn);
+  } else if (name == "dnnl.softmax_qnn.quantize") {
+    return parseSoftmaxQuantize(fn);
   } else {
     LOG(FATAL) << "Unknown composite function " << name;
   }

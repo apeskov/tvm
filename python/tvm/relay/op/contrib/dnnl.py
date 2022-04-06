@@ -331,6 +331,13 @@ def make_pattern_normalization():
     return pat_name, pat
 
 
+def make_pattern_softmax_qnn_quantize():
+    pat = is_op("nn.softmax")(wildcard())
+    pat = is_op("qnn.quantize")(pat, is_constant(), is_constant())
+    pat_name = "dnnl.softmax_qnn.quantize"
+    return pat_name, pat
+
+
 @register_pattern_table("dnnl")
 def pattern_table():
     """Create dnnl patterns.
@@ -362,6 +369,8 @@ def pattern_table():
         dnnl_patterns.append(make_pattern_qnn_matmul_reshape_dequantize(with_div))
     if dnnl_version >= (2, 5):
         dnnl_patterns.append(make_pattern_normalization())
+    if dnnl_version >= (2, 6):
+        dnnl_patterns.append(make_pattern_softmax_qnn_quantize())
 
     return dnnl_patterns
 

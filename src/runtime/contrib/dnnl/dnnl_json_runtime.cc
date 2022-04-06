@@ -238,7 +238,7 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
           QnnMatmul(nid);
         } else if ("dnnl.layer.normalize" == op_name) {
           LayerNorm(nid);
-        } else if ("nn.softmax" == op_name) {
+        } else if ("nn.softmax" == op_name || "dnnl.softmax_qnn.quantize" == op_name) {
           Softmax(nid);
         } else if ("nn.batch_norm" == op_name) {
           BatchNorm(nid);
@@ -768,15 +768,38 @@ class DNNLJSONRuntime : public JSONRuntimeBase {
     auto src_tr = node.getInput(0);
     auto dst_tr = node.getOutput(0);
 
-    // Matmul description.
+    auto axis = node.getAttr<int>("axis");
+
+    // Support of softmax_v2 appears since version 2.6 in oneDNN
+#if ((DNNL_VERSION_MAJOR == 2) && (DNNL_VERSION_MINOR >= 6)) || (DNNL_VERSION_MAJOR > 2)
+    dnnl::primitive_attr attr;
+    auto q_scale      = node.getInputByAttrName("q_scale_idx");
+    auto q_zero_point = node.getInputByAttrName("q_zp_idx");
+    if (q_scale && q_zero_point) {
+      auto q_scale_const = q_scale.getConstScalarData<float>();
+      auto q_zp_const = q_zero_point.getConstScalarData<int32_t>();
+      // zp != 0 is unsupported case
+      ICHECK_EQ(q_zp_const, 0);
+      float scale = 1.0f / q_scale_const;
+      attr.set_output_scales(0, {scale});
+    }
+    auto softmax_d = dnnl::softmax_v2_forward::desc(dnnl::prop_kind::forward_inference,
+                                                    dnnl::algorithm::softmax_accurate,
+                                                    src_tr.desc(), dst_tr.desc(), axis);
+    auto softmax_pd = dnnl::softmax_v2_forward::primitive_desc(softmax_d, attr, engine_);
+    auto softmax = dnnl::softmax_v2_forward(softmax_pd);
+#else
+    // Softmax description.
     auto softmax_d = dnnl::softmax_forward::desc(dnnl::prop_kind::forward_inference,
-                                                 src_tr.desc(), 3);
+                                                 src_tr.desc(), axis);
     auto softmax_pd = dnnl::softmax_forward::primitive_desc(softmax_d, engine_);
     auto softmax = dnnl::softmax_forward(softmax_pd);
+#endif
 
     src_tr = src_tr.requestLayout(softmax_pd.src_desc());
     dst_tr = dst_tr.requestLayout(softmax_pd.dst_desc());
 
+    // TODO: support in-place calculation.
     submit(softmax, {{DNNL_ARG_SRC, src_tr}, {DNNL_ARG_DST, dst_tr}});
   }
 

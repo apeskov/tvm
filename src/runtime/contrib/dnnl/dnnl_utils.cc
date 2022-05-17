@@ -26,6 +26,7 @@
 namespace tvm {
 namespace runtime {
 namespace contrib {
+
 using dt = dnnl::memory::data_type;
 dt dtype_dl2dnnl(DLDataType dltype) {
   dt dnnl_type = dt::undef;
@@ -51,6 +52,7 @@ dt dtype_dl2dnnl(DLDataType dltype) {
   }
   return dnnl_type;
 }
+
 }  // namespace contrib
 }  // namespace runtime
 }  // namespace tvm

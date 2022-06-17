@@ -104,14 +104,15 @@ def partition_for_dnnl(mod, params=None, alter_layout=True, prune_subgraphs=True
                         with TempOpAttr(
                             "nn.conv3d_transpose", "FTVMAlterOpLayout", dnnl.alter_conv_transpose
                         ):
-                            alter_layout_seq = tvm.transform.Sequential(
-                                [
-                                    transform.AlterOpLayout(),
-                                    transform.FoldConstant(),
-                                ]
-                            )
-                            with tvm.transform.PassContext(opt_level=3):
-                                mod = alter_layout_seq(mod)
+                            with TempOpAttr("qnn.conv2d", "FTVMAlterOpLayout", dnnl.alter_conv):
+                                alter_layout_seq = tvm.transform.Sequential(
+                                    [
+                                        transform.AlterOpLayout(),
+                                        transform.FoldConstant(),
+                                    ]
+                                )
+                                with tvm.transform.PassContext(opt_level=3):
+                                    mod = alter_layout_seq(mod)
 
     mod = dnnl.rewrite_layer_norm(mod)
     mod = dnnl.rewrite_dense_bias_gelu_reshape_last(mod)
@@ -1129,6 +1130,8 @@ def test_rewrite_dense_bias_gelu_reshape_last(run_module, dtype="float32"):
 
 
 def permute_shape(shape, l_from="", l_to=""):
+    if l_to is None:
+        return shape
     res_shape = []
     for label in l_to:
         pos = l_from.find(label)
@@ -1215,6 +1218,8 @@ def check_fully_annotated(mod, desired_compiler):
                 if "Compiler" in func.attrs and func.attrs["Compiler"] == desired_compiler:
                     matched_ops.append(op)
                     return
+            if op.name == "layout_transform":
+                return
             else:
                 other_ops.append(op)
 
@@ -1307,9 +1312,9 @@ base_conv_nhwc = base_conv._replace(D_LAYOUT="NHWC", K_LAYOUT="HWIO")
 base_conv_dilated = base_conv._replace(PAD=[2, 2], DEL=[2, 2])
 base_conv_no_pad = base_conv._replace(PAD=[0, 0])
 base_conv_no_pad_nhwc = base_conv_no_pad._replace(D_LAYOUT="NHWC", K_LAYOUT="HWIO")
+base_conv_no_pad_auto = base_conv_no_pad._replace(D_LAYOUT=None, K_LAYOUT=None)
 base_conv_group_no_pad = base_conv_no_pad._replace(GR=2)
 base_conv_dw_no_pad = base_conv_no_pad._replace(SHAPE=[1, 16, 5, 5], GR=16)
-
 
 DenseProfile = collections.namedtuple("DenseProfile", ["N", "IC", "OC"])
 base_dense_profile = DenseProfile(N=2, IC=10, OC=16)
@@ -1371,11 +1376,13 @@ qnn_conv_profiles = tvm.testing.parameter(
         "Group": (base_conv_group_no_pad, acp_regular, qp_asymmetric_data),
         "DW": (base_conv_dw_no_pad, acp_regular, qp_asymmetric_data),
         "NoBias": (base_conv, acp_no_bias, qp_regular),
-        "AsymmetricInput": (base_conv_no_pad, acp_regular, qp_asymmetric_data),
+        "AsymmetricInput_NCHW": (base_conv_no_pad, acp_regular, qp_asymmetric_data),
         "AsymmetricInput_NHWC": (base_conv_no_pad_nhwc, acp_regular, qp_asymmetric_data),
+        "AsymmetricInput_AUTO": (base_conv_no_pad_auto, acp_regular, qp_asymmetric_data),
         #  Pattern Conv2d + Requantize + Sum
-        "WithSum": (base_conv_no_pad, acp_with_sum, qp_asymmetric_data),
+        "WithSum_NCHW": (base_conv_no_pad, acp_with_sum, qp_asymmetric_data),
         "WithSum_NHWC": (base_conv_no_pad_nhwc, acp_with_sum, qp_asymmetric_data),
+        "WithSum_AUTO": (base_conv_no_pad_auto, acp_with_sum, qp_asymmetric_data),
         "WithSum_NoBias": (base_conv_no_pad, acp_no_bias_with_sum, qp_asymmetric_data),
     }
 )
@@ -1400,12 +1407,15 @@ def test_qnn_conv2d(qnn_conv_profiles):
         if p.GR != 1:
             w_shape[1] //= p.GR
 
-        d_shape = permute_shape(d_shape, l_from="NCHW", l_to=p.D_LAYOUT)
-        s_shape = permute_shape(s_shape, l_from="NCHW", l_to=p.D_LAYOUT)
-        w_shape = permute_shape(w_shape, l_from="OIHW", l_to=p.K_LAYOUT)
+        d_layout = p.D_LAYOUT if p.D_LAYOUT is not None else "NCHW"
+        k_layout = p.K_LAYOUT if p.K_LAYOUT is not None else "OIHW"
 
-        c_dim = p.D_LAYOUT.find("C")
-        b_shape = expand_dim(b_shape, rank=len(p.D_LAYOUT) - c_dim)
+        d_shape = permute_shape(d_shape, l_from="NCHW", l_to=d_layout)
+        s_shape = permute_shape(s_shape, l_from="NCHW", l_to=d_layout)
+        w_shape = permute_shape(w_shape, l_from="OIHW", l_to=k_layout)
+
+        c_dim = d_layout.find("C")
+        b_shape = expand_dim(b_shape, rank=len(d_layout) - c_dim)
 
         bld = QnnBuilder(qnn_profile=q)
 
@@ -1431,8 +1441,8 @@ def test_qnn_conv2d(qnn_conv_profiles):
             groups=p.GR,
             channels=p.OC,
             out_dtype="int32",
-            data_layout=p.D_LAYOUT,
-            kernel_layout=p.K_LAYOUT,
+            data_layout=d_layout,
+            kernel_layout=k_layout,
         )
         # Optional bias
         if c.Bias is not None:
@@ -1469,7 +1479,7 @@ def test_qnn_conv2d(qnn_conv_profiles):
 
     conv_p, arg_p, quant_p = qnn_conv_profiles
     ref_mod, args = generate_model(conv_p, arg_p, quant_p)
-    mod = partition_for_dnnl(ref_mod)
+    mod = partition_for_dnnl(ref_mod, alter_layout=conv_p.D_LAYOUT is None)
 
     # atol=1 means int values should match with +-1 quantum value tolerance
     check_result(mod, ref_mod, args, tol=1e-10, atol=1, desired_compiler="dnnl")

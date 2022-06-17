@@ -454,7 +454,7 @@ def legalize_group_conv(attrs, inputs, types):
 def alter_conv(attrs, inputs, tinfos, out_type):
     """The convolution's layout auto-query func for dnnl."""
 
-    data, weight = inputs
+    data, weight = inputs[0:2]
     groups = str(attrs.groups)
     weight_shape = ",".join([str(x) for x in get_shape(weight)])
     out_shape = ",".join([str(x) for x in get_shape(out_type)])
@@ -483,6 +483,8 @@ def alter_conv(attrs, inputs, tinfos, out_type):
 
     if conv_type == "Conv1D":
         return relay.nn.conv1d(data, weight, **new_attrs)
+    if conv_type == "Conv2D" and dtype in ("int8", "uint8"):
+        return relay.qnn.op.conv2d(*inputs, **new_attrs)
     if conv_type == "Conv2D":
         return relay.nn.conv2d(data, weight, **new_attrs)
     return relay.nn.conv3d(data, weight, **new_attrs)
@@ -939,9 +941,12 @@ class LegalizeQnnOpForDnnl(DFPatternCallback):
         # Conv:  reduce kernel {OC, IC, KH, KW} -> {OC} in case of group that is still correct
         # Dense: reduce kernel {OC, IC} -> {OC}
         wgh_int = relay.op.cast(wgh, dtype="int32")
+        axis_tags = [c.upper() for c in layout if c.isalpha()]
+        oc_axis = [i for i, c in enumerate(axis_tags) if c == "O"]
         reduced_kernel = relay.op.sum(
-            wgh_int, axis=[layout.index("O")], keepdims=False, exclude=True
+            wgh_int, axis=oc_axis, keepdims=False, exclude=True
         )
+        reduced_kernel = relay.op.reshape(reduced_kernel, newshape=[-1])
         return zp * reduced_kernel
 
     @staticmethod

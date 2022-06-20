@@ -46,7 +46,7 @@ from tvm.relay import expr as _expr
 
 
 from ... import _ffi_api
-from ...dataflow_pattern import wildcard, is_op, is_constant, is_expr, rewrite, DFPatternCallback
+from ...dataflow_pattern import wildcard, is_op, is_constant, is_expr, rewrite, DFPatternCallback, FunctionPattern
 from .register import register_pattern_table
 
 
@@ -104,6 +104,14 @@ _register_external_op_helper("nn.softmax")
 _register_external_op_helper("add")
 _register_external_op_helper("multiply")
 _register_external_op_helper("nn.layer_norm")
+
+
+# TODO: make it as is_op("dnnl.activation")
+def is_dnnl_activation():
+    """Create pattern for dnnl activation Op"""
+    dnnl_comp_act = wildcard().has_attr({"DnnlActType": "gelu_erf"})
+    # TODO: enhance list of activations
+    return dnnl_comp_act | is_op("nn.relu") | is_op("clip")
 
 
 def make_conv_pattern(conv_name, with_bias=True, with_eltwise=None):
@@ -260,7 +268,7 @@ def make_qnn_dense_pattern():
     pat = is_op("cast")(pat)
     pat = is_op("add")(pat, bias) | pat  # optional bias
     pat = is_op("multiply")(pat, o_scl)
-    pat = is_op("clip")(pat)  # TBD, not only clip
+    pat = is_dnnl_activation()(pat)
     pat = is_op("multiply")(pat, act_scl) | pat  # optional multiply. ex act_scl == 1
     pat = is_op("add")(pat, sum_scl * is_op("cast")(sum_src)) | pat  # optional sum
     pat = is_op("add")(pat, dst_zp) | pat  # optional dst_zp, can be dst_zp == 0
@@ -604,6 +612,35 @@ def prune_dnnl_subgraphs(mod):
                     return call.op(*args)
             return super().visit_call(call)
 
+    class UnmatchedActRemover(ExprMutator):
+        def __init__(self):
+            ExprMutator.__init__(self)
+            self.inside_dnnl_compiler = False
+
+        def visit_call(self, call):
+            if isinstance(call.op, GlobalVar):
+                is_dnnl_compiled = (hasattr(call.op, "attrs") and
+                                    "Compiler" in call.op.attrs and
+                                    call.op.attrs["Compiler"] == "dnnl")
+                if is_dnnl_compiled:
+                    self.inside_dnnl_compiler = True
+                res = super().visit_call(call)
+                if is_dnnl_compiled:
+                    self.inside_dnnl_compiler = False
+                return res
+
+            if isinstance(call.op, tvm.relay.Function) and "DnnlActType" in call.op.attrs and not self.inside_dnnl_compiler:
+                # Inline composite action
+                func = call.op
+                # var_map = {param: super().visit(arg) for arg, param in zip(call.args, func.params)}
+                var_map = {}
+                for arg, param in zip(call.args, func.params):
+                    var_map[param] = super().visit(arg)
+
+                return relay.bind(func.body, var_map)
+
+            return super().visit_call(call)
+
     subgraphs_to_remove = []
     # If only one subgraph, do nothing.
     if len(mod.get_global_vars()) <= 2:
@@ -618,6 +655,7 @@ def prune_dnnl_subgraphs(mod):
     # Create new pruned module
     new_mod = tvm.IRModule(mod.functions, mod.type_definitions)
     new_mod["main"] = SubgraphRemover(subgraphs_to_remove, mod, new_mod).visit(mod["main"])
+    new_mod["main"] = UnmatchedActRemover().visit(new_mod["main"])
     new_mod = transform.RemoveUnusedFunctions()(new_mod)
     return new_mod
 
@@ -967,10 +1005,167 @@ class LegalizeQnnOpForDnnl(DFPatternCallback):
         raise ValueError("Unexpected bias rank to broadcast. Only 0 and 1 are supported.")
 
 
+class LegalizeQnnOpForDnnlV2(DFPatternCallback):
+    """Legalize QNN based patterns to match DNNL compatible subgraph
+    """
+
+    def __init__(self):
+        super(LegalizeQnnOpForDnnlV2, self).__init__()
+        self.src = wildcard()
+        self.wgh = wildcard()
+        self.bias = wildcard()
+        self.sum_src = wildcard()
+
+        self.src_scl = is_constant()
+        self.src_zp = is_constant()
+        self.wgh_scl = is_constant()
+        self.wgh_zp = is_expr(const(0))
+
+        self.rq_in_scl = is_constant()
+        self.rq_in_zp = is_constant()
+        self.rq_out_scl = is_constant()
+        self.rq_out_zp = is_constant()
+
+        self.sum_lhs_scl = is_constant()
+        self.sum_lhs_zp = is_constant()
+        self.sum_rhs_scl = is_constant()
+        self.sum_rhs_zp = is_constant()
+        self.sum_out_scl = is_constant()
+        self.sum_out_zp = is_constant()
+
+        self.root = (is_op("qnn.conv2d") | is_op("qnn.dense"))(
+            self.src, self.wgh, self.src_zp, self.wgh_zp, self.src_scl, self.wgh_scl
+        )
+        self.reshape = is_op("reshape")(self.root)
+        pat = self.reshape | self.root  # optional reshape
+        pat = is_op("add")(pat, self.bias) | pat  # optional bias int32
+        pat = is_op("qnn.dequantize")(pat, self.rq_in_scl, self.rq_in_zp)
+        pat = is_op("add")(pat, self.bias) | pat  # optional bias float
+        self.act = is_dnnl_activation()(pat)
+        pat = self.act | pat  # optional activation
+        pat = is_op("qnn.quantize")(pat, self.rq_out_scl, self.rq_out_zp)
+        pat = is_op("qnn.add")(
+            pat,
+            self.sum_src,
+            self.sum_lhs_scl,
+            self.sum_lhs_zp,
+            self.sum_rhs_scl,
+            self.sum_rhs_zp,
+            self.sum_out_scl,
+            self.sum_out_zp,
+        ) | pat  # optional sum
+
+        self.pattern = pat
+
+    def callback(self, pre, post, node_map):
+        root = node_map[self.root][0]
+        src = node_map[self.src][0]
+        wgh = node_map[self.wgh][0]
+        bias = node_map.get(self.bias, default=[relay.const(0, dtype="int32")])[0]
+        act = node_map[self.act][0]
+        src_zp = node_map[self.src_zp][0]
+        rq_in_scl = node_map[self.rq_in_scl][0]
+        rq_in_zp = node_map[self.rq_in_zp][0]
+        rq_out_scl = node_map[self.rq_out_scl][0]
+        rq_out_zp = node_map[self.rq_out_zp][0]
+
+        last_op = node_map[self.pattern][0]
+        final_dtype = last_op.checked_type.dtype
+        final_shape = last_op.checked_type.shape
+
+        if root.op == relay.op.get("qnn.conv2d"):
+            dst_layout = root.attrs.out_layout
+            dst_layout = root.attrs.data_layout if dst_layout == "" else dst_layout
+            wgh_layout = root.attrs.kernel_layout
+        else:
+            # qnn.dense has no layout attributes. Assume that is plain
+            dst_layout = "NC"
+            wgh_layout = "OI"
+
+        # TODO(@apeskov): dst_layout may ne blocked
+        bias_rank = len(dst_layout) - dst_layout.index("C")
+
+        sum_src = node_map[self.sum_src][0] if self.sum_src in node_map else None
+        # Default values if qnn.sum is not present
+        sum_lhs_scl = node_map[self.sum_lhs_scl][0] if sum_src else relay.const(1, dtype="float32")
+        sum_lhs_zp = node_map[self.sum_lhs_zp][0] if sum_src else relay.const(0, dtype="int32")
+        sum_rhs_scl = node_map[self.sum_rhs_scl][0] if sum_src else relay.const(0, dtype="float32")
+        sum_rhs_zp = node_map[self.sum_rhs_zp][0] if sum_src else relay.const(0, dtype="int32")
+        sum_out_scl = node_map[self.sum_out_scl][0] if sum_src else relay.const(1, dtype="float32")
+        sum_out_zp = node_map[self.sum_out_zp][0] if sum_src else relay.const(0, dtype="int32")
+
+        def cast_fp(op):
+            return relay.op.cast(op, dtype="float32")
+
+        # recalculate some factors
+        o_scl = rq_in_scl
+        act_scl = const(1.0) / rq_out_scl
+        dst_zp = cast_fp(rq_out_zp)
+        # sum_scl = sum_rhs_scl / sum_out_scl
+        bias = self.squeeze_bias(bias, dst_layout)
+        bias = bias / rq_in_scl - cast_fp(rq_in_zp) - cast_fp(self.fake_op(src_zp, wgh, wgh_layout))
+        bias = self.broadcast_to_rank(bias, bias_rank)
+
+        zero_zp = relay.const(0, dtype="int32")
+        one_scl = relay.const(1.0, dtype="float32")
+
+        # construct new graph with proper post op ordering
+        gr = tvm.relay.Call(
+            root.op,
+            [src, wgh, zero_zp, zero_zp, one_scl, one_scl],
+            root.attrs,
+            root.type_args,
+            root.span,
+        )
+        gr = relay.op.cast(gr, dtype="float32")
+        gr = gr + bias
+        gr = gr * o_scl
+        gr = tvm.relay.Call(act.op, [gr], act.attrs, act.type_args, act.span)
+        gr = gr * act_scl
+        gr = gr + sum_scl * cast_fp(sum_src) if sum_src else gr
+        gr = gr + dst_zp
+        gr = relay.op.cast(gr, dtype=final_dtype)
+
+        # restore shape and dtype
+        gr = relay.op.reshape(gr, newshape=final_shape)
+        return gr
+
+    @staticmethod
+    def fake_op(zp, wgh, layout):
+        """Fake operator implementation for zp broadcast input"""
+        # Conv:  reduce kernel {OC, IC, KH, KW} -> {OC} in case of group that is still correct
+        # Dense: reduce kernel {OC, IC} -> {OC}
+        wgh_int = relay.op.cast(wgh, dtype="int32")
+        axis_tags = [c.upper() for c in layout if c.isalpha()]
+        oc_axis = [i for i, c in enumerate(axis_tags) if c == "O"]
+        reduced_kernel = relay.op.sum(
+            wgh_int, axis=oc_axis, keepdims=False, exclude=True
+        )
+        reduced_kernel = relay.op.reshape(reduced_kernel, newshape=[-1])
+        return zp * reduced_kernel
+
+    @staticmethod
+    def squeeze_bias(bias, layout):
+        shape = transform.InferTypeLocal(bias).concrete_shape
+        c_position = layout.index("C") - len(layout) + len(shape)
+        squeeze_idxs = [i for i in range(len(shape)) if i != c_position]
+        return relay.op.squeeze(bias, squeeze_idxs)
+
+    @staticmethod
+    def broadcast_to_rank(op, rank):
+        """Scalar or 1D tensor are supported"""
+        shape = transform.InferTypeLocal(op).concrete_shape
+        if len(shape) == 0:
+            return op
+        if len(shape) == 1:
+            return relay.op.expand_dims(op, 1, rank - 1)
+        raise ValueError("Unexpected bias rank to broadcast. Only 0 and 1 are supported.")
+
+
 def legalize_qnn_for_dnnl(mod):
     """Transform qnn primitives to DNNL compatible form. Eliminate source zero point and apply
     strict sequence of post ops."""
-    mod["main"] = rewrite(LegalizeQnnOpForDnnl(), mod["main"])
+    mod["main"] = rewrite([LegalizeQnnOpForDnnl(), LegalizeQnnOpForDnnlV2()], mod["main"])
 
     seq = tvm.transform.Sequential(
         [
@@ -982,4 +1177,19 @@ def legalize_qnn_for_dnnl(mod):
     )
     with tvm.transform.PassContext(opt_level=3):
         mod = seq(mod)
+    return mod
+
+
+def activation_for_dnnl(mod):
+    x = wildcard()
+    sqrt2 = is_constant().has_dtype("float32").has_shape([])  # fp32 scalar
+    half = is_expr(const(0.5))
+    one = is_expr(const(1.0))
+    gelu = half * x * (one + is_op("erf")(x / sqrt2))
+
+    def check(expr):
+        # TODO: implement check if sqrt2 const node is really 2**0.5
+        return True
+
+    mod["main"] = gelu.partition(mod["main"], attrs={"DnnlActType": "gelu_erf"}, check=check)
     return mod

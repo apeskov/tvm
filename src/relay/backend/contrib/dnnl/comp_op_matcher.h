@@ -71,6 +71,12 @@ tvm::relay::Expr constant(float val) {
   return res;
 }
 
+tvm::relay::DFPattern IsDnnlAct() {
+  using namespace tvm::relay;
+  auto dnnl_comp_act = IsWildcard().HasAttr({{"DnnlActType", tvm::String("gelu_erf")}});
+  return IsOp("nn.relu") || IsOp("clip") || dnnl_comp_act;
+}
+
 /*!
  * \brief Simple helper to accumulate composite function arguments and corresponding attributes
  * with indexes of them.
@@ -85,9 +91,36 @@ class ArgPacker {
     int idx = args_->size();
     args_->push_back(arg);
     if (!tag_name.empty()) {
-      attrs_->operator[](tag_name) = dmlc_attr(idx);
+      (*attrs_)[tag_name] = dmlc_attr(idx);
     }
     return idx;
+  }
+
+  void PutActivation(const tvm::relay::Expr& act, const tvm::relay::Expr& act_scl) {
+    auto act_cn = act.as<tvm::relay::CallNode>();
+    ICHECK(act_cn);
+
+    auto act_scl_val = act_scl.defined() ? act_scl : constant(1.0);  // 1.0 means no scaling
+
+    std::string act_name = "";
+    if (auto op = act_cn->op.as<tvm::relay::OpNode>())
+      act_name = op->name;
+    else if (auto fn = act_cn->op.as<tvm::relay::FunctionNode>())
+      act_name = fn->GetAttr<tvm::String>("DnnlActType").value();
+    ICHECK(!act_name.empty());
+
+    // Default values. TODO: check if it acceptable for all activations
+    auto act_alpha = constant(0.0);
+    auto act_beta = constant(0.0);
+
+    if (act_name == "clip")
+      act_beta = constant(255.0);
+
+    std::vector<std::string> clip_attr{act_name};
+    clip_attr.push_back(std::to_string(Put(act_scl)));
+    clip_attr.push_back(std::to_string(Put(act_alpha)));
+    clip_attr.push_back(std::to_string(Put(act_beta)));
+    (*attrs_)["activation"] = dmlc_attr(clip_attr);
   }
 
  private:
@@ -111,15 +144,14 @@ const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& com
   auto sum_scl = IsConstant();
   auto dst_zp = IsConstant();
 
-  DFPattern cnv;
-  DFPattern pat;
+  DFPattern cnv, act, pat;
 
   cnv = IsOp("qnn.conv2d")({src, wgh, IsConstant(), IsConstant(), IsConstant(), IsConstant()});
   pat = IsOp("cast")({cnv});
   pat = IsOp("add")({pat, bias}) || pat;
   pat = IsOp("multiply")({pat, o_scl});
-  pat = IsOp("clip")({pat});
-  pat = IsOp("multiply")({pat, act_scl}) || pat;
+  act = IsDnnlAct()({pat});
+  pat = IsOp("multiply")({act, act_scl}) || act;
   pat = IsOp("add")({pat, sum_scl * IsOp("cast")({sum_src})}) || pat;
   pat = IsOp("add")({pat, dst_zp}) || pat;
   pat = IsOp("cast")({pat});
@@ -146,14 +178,7 @@ const tvm::relay::CallNode* ParseQnnConvComp(const tvm::relay::FunctionNode& com
   arg_holder.Put(find(act_scl), "act_scl_idx");
   arg_holder.Put(find(sum_scl), "sum_scl_idx");
   arg_holder.Put(find(dst_zp), "dst_zp_idx");
-
-  // Activation. Default clip to simulate relu via uint8 cast
-  std::vector<std::string> clip_attr{"clip"};
-  auto act_scl_val = map.count(act_scl) ? find(act_scl) : constant(1.0);
-  clip_attr.push_back(std::to_string(arg_holder.Put(act_scl_val)));      // act_scale
-  clip_attr.push_back(std::to_string(arg_holder.Put(constant(0.0))));    // alpha
-  clip_attr.push_back(std::to_string(arg_holder.Put(constant(255.0))));  // beta
-  (*ext_attrs)["activation"] = dmlc_attr(clip_attr);
+  arg_holder.PutActivation(find(act), find(act_scl));
 
   return map.at(cnv)[0].as<CallNode>();
 }
@@ -180,8 +205,8 @@ const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& co
   pat = IsOp("cast")({dns});
   pat = IsOp("add")({pat, bias}) || pat;
   pat = IsOp("multiply")({pat, o_scl});
-  pat = IsOp("clip")({pat});
-  pat = IsOp("multiply")({pat, act_scl}) || pat;
+  act = IsDnnlAct()({pat});
+  pat = IsOp("multiply")({act, act_scl}) || act;
   pat = IsOp("add")({pat, sum_scl * IsOp("cast")({sum_src})}) || pat;
   pat = IsOp("add")({pat, dst_zp}) || pat;
   pat = IsOp("cast")({pat});
@@ -208,14 +233,7 @@ const tvm::relay::CallNode* ParseQnnDenseComp(const tvm::relay::FunctionNode& co
   arg_holder.Put(find(act_scl), "act_scl_idx");
   arg_holder.Put(find(sum_scl), "sum_scl_idx");
   arg_holder.Put(find(dst_zp), "dst_zp_idx");
-
-  // Activation. Default clip to simulate relu via uint8 cast
-  std::vector<std::string> clip_attr{"clip"};
-  auto act_scl_val = memo.count(act_scl) ? find(act_scl) : constant(1.0);
-  clip_attr.push_back(std::to_string(arg_holder.Put(act_scl_val)));      // act_scale
-  clip_attr.push_back(std::to_string(arg_holder.Put(constant(0.0))));    // alpha
-  clip_attr.push_back(std::to_string(arg_holder.Put(constant(255.0))));  // beta
-  (*ext_attrs)["activation"] = dmlc_attr(clip_attr);
+  arg_holder.PutActivation(find(act), find(act_scl));
 
   return memo.at(dns)[0].as<CallNode>();
 }

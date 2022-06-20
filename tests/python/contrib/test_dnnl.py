@@ -114,6 +114,7 @@ def partition_for_dnnl(mod, params=None, alter_layout=True, prune_subgraphs=True
                                 with tvm.transform.PassContext(opt_level=3):
                                     mod = alter_layout_seq(mod)
 
+    mod = dnnl.activation_for_dnnl(mod)
     mod = dnnl.rewrite_layer_norm(mod)
     mod = dnnl.rewrite_dense_bias_gelu_reshape_last(mod)
     mod = dnnl.legalize_qnn_for_dnnl(mod)
@@ -602,6 +603,12 @@ def gelu_helper(data):
     mul1 = relay.op.multiply(data, added_erf)
     out = relay.op.multiply(mul1, const3)
     return out
+
+    # op3 = relay.op.divide(op, relay.const(1.41421))
+    # op4 = relay.op.erf(op3)
+    # op5 = relay.op.multiply(op, relay.const(0.5))
+    # op6 = relay.op.add(op4, relay.const(1.0))
+    # op = relay.op.multiply(op5, op6)
 
 
 def get_dense(
@@ -1211,14 +1218,14 @@ def check_fully_annotated(mod, desired_compiler):
     other_ops = []
 
     def _visit(node):
-        if isinstance(node, tvm.relay.Call):
+        if isinstance(node, relay.Call):
             op = node.op
             if isinstance(op, relay.GlobalVar):
                 func = mod[op]
                 if "Compiler" in func.attrs and func.attrs["Compiler"] == desired_compiler:
                     matched_ops.append(op)
                     return
-            if op.name == "layout_transform":
+            if isinstance(op, tvm.ir.Op) and op.name in ["layout_transform", "reshape"]:
                 return
             else:
                 other_ops.append(op)
@@ -1671,6 +1678,225 @@ def test_dense_plus(dense_profiles):
     ref_mod, args = generate_model(dense_p, arg_p)
     mod = partition_for_dnnl(ref_mod)
     check_result(mod, ref_mod, args, tol=1e-5, desired_compiler="dnnl")
+
+
+@has_dnnl_codegen
+def test_qnn_dense_gelu_pattern():
+    def generate_model(with_gelu=True):
+        np.random.seed(0)
+
+        d_shape = (2, 8)
+        w_shape = (3, 8)
+        b_shape = w_shape[0]
+        r_shape = (1, d_shape[0], w_shape[0])
+
+        # Init input parameters
+        dtype = "int8"
+        bld = QnnBuilder()
+        data = bld.arg(shape=d_shape, dtype=dtype, is_const=False, filler=filler_uni(-10, 9))
+        weights = bld.arg(shape=w_shape, dtype=dtype, is_const=True, filler=filler_uni(-20, 19))
+        bias = bld.arg(shape=b_shape, dtype="float32", is_const=True)
+
+        # Init quantization parameters
+        i_zp = relay.const(0)
+        k_zp = relay.const(0)
+        i_scale = relay.const(0.09)
+        w_scale = relay.const(0.09)
+        d_scale = relay.const(0.05)
+        o_scale = relay.const(0.07)
+
+        # Create sequence of ops
+        op0 = relay.qnn.op.dense(data, weights, i_zp, k_zp, i_scale, w_scale, units=None)
+        op1 = relay.op.reshape(op0, r_shape)
+        op2 = relay.qnn.op.dequantize(op1, d_scale, i_zp, axis=1)
+        op = relay.op.add(op2, bias)
+        if with_gelu is True:
+            op3 = relay.op.divide(op, relay.const(1.41421))
+            op4 = relay.op.erf(op3)
+            op5 = relay.op.multiply(op, relay.const(0.5))
+            op6 = relay.op.add(op4, relay.const(1.0))
+            op = relay.op.multiply(op5, op6)
+        op_last = relay.qnn.op.quantize(op, o_scale, i_zp, axis=0)
+
+        return bld.finalize(op_last)
+
+    ref_mod, params = generate_model(with_gelu=True)
+    mod = partition_for_dnnl(ref_mod)
+
+    # atol=1 means int values should match with +-1 quantum value tolerance
+    check_result(mod, ref_mod, params, tol=1e-10, atol=1, desired_compiler="dnnl")
+
+
+# TODO: this test doesn't work...  :'(
+@has_dnnl_codegen
+def test_qnn_dense_add_requantize_pattern():
+    def generate_model():
+        np.random.seed(0)
+
+        d_shape = (2, 8)
+        w_shape = (3, 8)
+        b_shape = w_shape[0]
+        r_shape = (1, d_shape[0], w_shape[0])
+
+        # Init input parameters
+        dtype = "int8"
+        bld = QnnBuilder()
+        data = bld.arg(shape=d_shape, dtype=dtype, is_const=False, filler=filler_uni(-10, 9))
+        weights = bld.arg(shape=w_shape, dtype=dtype, is_const=True, filler=filler_uni(-20, 19))
+        bias = bld.arg(shape=b_shape, dtype="int32", is_const=True, filler=filler_uni(-30, 29))
+
+        # Init quantization parameters
+        zp = relay.const(0)
+        i_scale = relay.const(0.09)
+        w_scale = relay.const(0.09)
+        ri_scale = relay.const(0.05)
+        ro_scale = relay.const(0.2)
+
+        # Create sequence of ops
+        op0 = relay.qnn.op.dense(data, weights, zp, zp, i_scale, w_scale, units=None)
+        op1 = relay.op.reshape(op0, r_shape)
+        op2 = relay.qnn.op.add(op1, bias, ri_scale, zp, ri_scale, zp, ri_scale, zp)
+        op_last = relay.qnn.op.requantize(op2, ri_scale, zp, ro_scale, zp, axis=1)
+
+        return bld.finalize(op_last)
+
+    ref_mod, params = generate_model()
+    mod = partition_for_dnnl(ref_mod)
+    print("ref mod")
+    print(ref_mod)
+    print("dnnl mod")
+    print(mod)
+
+    # atol=1 means int values should match with +-1 quantum value tolerance
+    check_result(mod, ref_mod, params, tol=1e-10, atol=1, desired_compiler="dnnl")
+
+
+@has_dnnl_codegen
+def test_softmax_quantize_pattern():
+    def generate_model():
+        np.random.seed(0)
+
+        # Init input parameters
+        bld = QnnBuilder()
+        data = bld.arg(shape=(1, 2, 4, 4), dtype="float32", is_const=False)
+
+        # Init quantization parameters
+        zp = relay.const(0)
+        scale = relay.const(0.005)
+
+        # Create sequence of ops
+        op0 = relay.op.nn.softmax(data, axis=3)
+        op_last = relay.qnn.op.quantize(op0, scale, zp, axis=0)
+
+        return bld.finalize(op_last)
+
+    ref_mod, params = generate_model()
+    mod = partition_for_dnnl(ref_mod)
+
+    # Softmax + qnn.quantize fusion is possible since v2.6 of oneDNN.
+    # desired_compiler == None skip verification of full dnnl offload.
+    desired_compiler = None if dnnl.get_dnnl_version() < (2, 6) else "dnnl"
+
+    # atol=1 means int values should match with +-1 quantum value tolerance
+    check_result(mod, ref_mod, params, tol=1e-10, atol=1, desired_compiler=desired_compiler)
+
+
+@has_dnnl_codegen
+def test_qnn_matmul_requantize_pattern():
+    def generate_model():
+        d_shape = (2, 4, 8)
+        w_shape = (2, 8, 4)
+
+        # Init input parameters
+        dtype = "int8"
+        bld = QnnBuilder()
+        data = bld.arg(shape=d_shape, dtype=dtype, is_const=False, filler=filler_uni(-20, 19))
+        weights = bld.arg(shape=w_shape, dtype=dtype, is_const=False, filler=filler_uni(-20, 19))
+
+        # Init quantization parameters
+        zp = relay.const(0)
+        i_scale = relay.const(0.09)
+        w_scale = relay.const(0.08)
+        ri_scale = relay.const(0.05)
+        ro_scale = relay.const(0.2)
+
+        # Create sequence of ops
+        op0 = relay.op.transpose(weights, [0, 2, 1])
+        op1 = relay.qnn.op.batch_matmul(data, op0, zp, zp, i_scale, w_scale)
+        op_last = relay.qnn.op.requantize(op1, ri_scale, zp, ro_scale, zp)
+
+        return bld.finalize(op_last)
+
+    ref_mod, params = generate_model()
+    mod = partition_for_dnnl(ref_mod)
+
+    # atol=1 means int values should match with +-1 quantum value tolerance
+    check_result(mod, ref_mod, params, tol=1e-10, atol=1)
+
+
+@has_dnnl_codegen
+def test_qnn_matmul_dequantize_pattern():
+    def generate_model(with_div):
+        d_shape = (2, 4, 8)
+        w_shape = (2, 8, 4)
+        r_shape = (1, d_shape[0], d_shape[1], w_shape[2])
+
+        # Init input parameters
+        dtype = "int8"
+        bld = QnnBuilder()
+        data = bld.arg(shape=d_shape, dtype=dtype, is_const=False, filler=filler_uni(-20, 19))
+        weights = bld.arg(shape=w_shape, dtype=dtype, is_const=False, filler=filler_uni(-20, 19))
+
+        # Init quantization parameters
+        zp = relay.const(0)
+        i_scale = relay.const(0.09)
+        w_scale = relay.const(0.08)
+        d_scale = relay.const(0.05)
+
+        # Create sequence of ops
+        op0 = relay.op.transpose(weights, [0, 2, 1])
+        op1 = relay.qnn.op.batch_matmul(data, op0, zp, zp, i_scale, w_scale)
+        op2 = relay.op.reshape(op1, r_shape)
+        op = relay.qnn.op.dequantize(op2, d_scale, zp, axis=0)
+        if with_div is True:
+            op = relay.op.divide(op, relay.const(8.0))
+
+        return bld.finalize(op)
+
+    for with_div in [True, False]:
+        ref_mod, params = generate_model(with_div)
+        mod = partition_for_dnnl(ref_mod)
+        check_result(mod, ref_mod, params, tol=1e-5)
+
+
+@has_dnnl_codegen
+def test_layer_norm_pattern():
+    def generate_model():
+        d_shape = (1, 4, 8)
+
+        # Init input parameters
+        bld = QnnBuilder()
+        data = bld.arg(shape=d_shape, dtype="float32", is_const=False)
+        scale = bld.arg(shape=(d_shape[2]), dtype="float32", is_const=True)
+        shift = bld.arg(shape=(d_shape[2]), dtype="float32", is_const=True)
+
+        # Create sequence of ops
+        op0 = relay.op.mean(data, axis=[-1], keepdims=True)
+        op1 = relay.op.subtract(data, op0)
+        op2 = relay.op.power(op1, relay.const(2.0))
+        op3 = relay.op.mean(op2, axis=[-1], keepdims=True)
+        op4 = relay.op.add(op3, relay.const(1e-12))
+        op5 = relay.op.sqrt(op4)
+        op6 = relay.op.divide(op1, op5)
+        op7 = relay.op.multiply(op6, scale)
+        op_last = relay.op.add(op7, shift)
+
+        return bld.finalize(op_last)
+
+    ref_mod, params = generate_model()
+    mod = partition_for_dnnl(ref_mod)
+
+    check_result(mod, ref_mod, params, tol=1e-5)
 
 
 if __name__ == "__main__":

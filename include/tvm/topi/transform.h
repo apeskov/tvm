@@ -24,6 +24,7 @@
 #ifndef TVM_TOPI_TRANSFORM_H_
 #define TVM_TOPI_TRANSFORM_H_
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/te/operation.h>
 #include <tvm/tir/data_layout.h>
 #include <tvm/tir/index_map.h>
@@ -1622,6 +1623,13 @@ inline Tensor layout_transform(const Tensor& src, const std::string& src_layout,
                                   {"dst_layout", String(dst_layout)},
                                   {"input_shape", src->shape}};
 
+  arith::Analyzer cmp;
+  auto padded_src_shape = layout_converter.BackwardShape(dst_shape);
+  std::vector<bool> src_dim_to_pad(src.ndim(), false);
+  for (size_t i = 0; i < src.ndim(); i++) {
+    src_dim_to_pad[i] = !cmp.CanProveEqual(src->shape[i], padded_src_shape[i]);
+  }
+
   return compute(
       dst_shape,
       [&](const Array<Var>& dst_indices) {
@@ -1629,7 +1637,8 @@ inline Tensor layout_transform(const Tensor& src, const std::string& src_layout,
         Array<PrimExpr> src_indices = layout_converter.BackwardIndex(dst_indices_expr);
         PrimExpr in_range = PrimExpr(1) > PrimExpr(0);  // init with dtype=bool and value=true
         for (size_t i = 0; i < src.ndim(); ++i) {
-          in_range = in_range && (src_indices[i] < src->shape[i]);
+          if (src_dim_to_pad[i])
+            in_range = in_range && (src_indices[i] < src->shape[i]);
         }
         return if_then_else(in_range, src(src_indices), tvm::cast(src->dtype, PrimExpr(0)));
       },

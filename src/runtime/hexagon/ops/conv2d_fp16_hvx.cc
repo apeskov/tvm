@@ -46,6 +46,109 @@
 extern "C" int conv2d_packed_fp16(TVMValue* args, int* type_codes, int num_args, TVMValue* out_val,
                                   int out_code, void* res_handle);
 
+extern "C" void HexagonCopyStridedSrc(uint8_t* src, uint8_t* dst, int32_t src_stride) {
+  asm volatile(
+      "{                      \n\t"
+      "    v0 = vmemu(%0)     \n\t"
+      "    %0 = add(%0, %2)   \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    v1 = vmemu(%0)     \n\t"
+      "    %0 = add(%0, %2)   \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    v2 = vmemu(%0)     \n\t"
+      "    %0 = add(%0, %2)   \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    v3 = vmemu(%0)     \n\t"
+      "    r7 = #32           \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    vshuff(v1, v0, r7) \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    vshuff(v3, v2, r7) \n\t"
+      "    r7 = #64           \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    vshuff(v2, v0, r7) \n\t"
+      "}                      \n\t"
+      "{                      \n\t"
+      "    vmemu(%1) = v0     \n\t"
+      "}                      \n\t"
+      :
+      : "r"(src), "r"(dst), "r"(src_stride)
+      : "r7", "v0", "v1", "v2", "v3","memory");
+}
+
+
+
+extern "C" void HexagonCopyStridedDst(uint8_t* src, uint8_t* dst, int32_t dst_stride) {
+  asm volatile(
+      "{                            \n\t"
+      "    v4 = vmemu(%0)           \n\t"
+      "    r7 = %1                  \n\t"
+      "    r6 = #32                 \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    q0 = vsetq(r6)           \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    v0 = vmemu(%1)           \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    v1 = vmemu(%1)           \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    v2 = vmemu(%1)           \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    v3 = vmemu(%1)           \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "    V7:6 = vswap(q0, v4, v0) \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    vmemu(r7) = v6           \n\t"  // V0 store
+      "}                            \n\t"
+      "{                            \n\t"
+      "    r7 = add(r7, %2)         \n\t"
+      "    v4 = valign(v4, v4, r6)  \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    V7:6 = vswap(q0, v4, v1) \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    vmemu(r7) = v6           \n\t"  // V1 store
+      "}                            \n\t"
+      "{                            \n\t"
+      "    r7 = add(r7, %2)         \n\t"
+      "    v4 = valign(v4, v4, r6)  \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    V7:6 = vswap(q0, v4, v2) \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    vmemu(r7) = v6           \n\t"  // V2 store
+      "}                            \n\t"
+      "{                            \n\t"
+      "    r7 = add(r7, %2)         \n\t"
+      "    v4 = valign(v4, v4, r6)  \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    V7:6 = vswap(q0, v4, v3) \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    vmemu(r7) = v6           \n\t"  // V3 store
+      "}                            \n\t"
+      :
+      : "r"(src), "r"(dst), "r"(dst_stride)
+      : "r7", "r6", "v0", "v1", "v2", "v3", "v4", "v6", "v7", "memory");
+}
+
 namespace tvm {
 namespace runtime {
 namespace hexagon {

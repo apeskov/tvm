@@ -225,7 +225,6 @@ def generate_copy_strided_src_32_man(mem_scope="global"):
             src: T.handle = T.address_of(A[0, 0], dtype="handle")
             dst: T.handle = T.address_of(C[0, 0], dtype="handle")
 
-            # Works
             src_1: T.handle = T.address_of(A[1, 0], dtype="handle")
             src_stride = T.reinterpret(src_1, dtype="int32") - T.reinterpret(src, dtype="int32")
 
@@ -258,11 +257,45 @@ def generate_copy_strided_dst_32_man(mem_scope="global"):
             src: T.handle = T.address_of(A[0, 0], dtype="handle")
             dst: T.handle = T.address_of(C[0, 0], dtype="handle")
 
-            # Works
             dst_1: T.handle = T.address_of(C[1, 0], dtype="handle")
             dst_stride = T.reinterpret(dst_1, dtype="int32") - T.reinterpret(dst, dtype="int32")
 
             T.call_extern("HexagonCopyStridedDst", src, dst, dst_stride, dtype="")
+
+    return intrin_desc, intrin_impl
+
+
+def generate_copy_strided_dst_8x8x32_man(mem_scope="global"):
+    @T.prim_func
+    def intrin_desc(a: T.handle, c: T.handle) -> None:
+        A = T.match_buffer(a, (8, 8, 32), "uint8", offset_factor=1, scope=mem_scope)
+        C = T.match_buffer(c, (8, 8, 32), "uint8", offset_factor=1, scope=mem_scope)
+        with T.block("root"):
+            T.reads(A[0:8, 0:8, 0:32])
+            T.writes(C[0:8, 0:8, 0:32])
+            for h, w, c_i in T.grid(8, 8, 32):
+                with T.block("update"):
+                    h_, w_, c_i_ = T.axis.remap("SSS", [h, w, c_i])
+                    C[h_, w_, c_i_] = A[h_, w_, c_i_]  # Just copy, but C has not trivial stride
+
+    @T.prim_func
+    def intrin_impl(a: T.handle, c: T.handle) -> None:
+        A = T.match_buffer(a, (8, 8, 32), "uint8", offset_factor=1, scope=mem_scope)
+        C = T.match_buffer(c, (8, 8, 32), "uint8", offset_factor=1, scope=mem_scope)
+        with T.block("root"):
+            T.reads(A[0:8, 0:8, 0:32])
+            T.writes(C[0:8, 0:8, 0:32])
+
+            src: T.handle = T.address_of(A[0, 0, 0], dtype="handle")
+            dst: T.handle = T.address_of(C[0, 0, 0], dtype="handle")
+
+            dst_w_1: T.handle = T.address_of(C[0, 1, 0], dtype="handle")
+            dst_w_stride = T.reinterpret(dst_w_1, dtype="int32") - T.reinterpret(dst, dtype="int32")
+
+            dst_h_1: T.handle = T.address_of(C[1, 0, 0], dtype="handle")
+            dst_h_stride = T.reinterpret(dst_h_1, dtype="int32") - T.reinterpret(dst, dtype="int32")
+
+            T.call_extern("HexagonCroutonBlock_8x8x32_intin", src, dst, dst_w_stride, dst_h_stride, dtype="")
 
     return intrin_desc, intrin_impl
 
@@ -291,10 +324,6 @@ def generate_trans_4x4x32_u8_man(mem_scope="global"):
 
             src: T.handle = T.address_of(A[0, 0], dtype="handle")
             dst: T.handle = T.address_of(C[0, 0, 0, 0, 0, 0], dtype="handle")
-
-            # Don't work. dst_stride is always zero.
-            # src_stride = A.offset_of([1, 0])[0] - A.offset_of([0, 0])[0]
-            # dst_stride = C.offset_of([1, 0, 0, 0, 0, 0])[0] - C.offset_of([0, 0, 0, 0, 0, 0])[0]
 
             # Works
             src_1: T.handle = T.address_of(A[1, 0], dtype="handle")
@@ -390,3 +419,6 @@ TensorIntrin.register(VMEM_COPY_STRIDED_SRC_32_INTRIN_MAN, *generate_copy_stride
 
 VMEM_COPY_STRIDED_DST_32_INTRIN_MAN = "vmem_copy_strided_dst_32_man"
 TensorIntrin.register(VMEM_COPY_STRIDED_DST_32_INTRIN_MAN, *generate_copy_strided_dst_32_man())
+
+VMEM_COPY_STRIDED_DST_8x8x32_INTRIN_MAN = "vmem_copy_strided_dst_8x8x32_man"
+TensorIntrin.register(VMEM_COPY_STRIDED_DST_8x8x32_INTRIN_MAN, *generate_copy_strided_dst_8x8x32_man())

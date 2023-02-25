@@ -3,7 +3,11 @@ import numpy as np
 import tvm.testing
 from tvm import meta_schedule as ms
 from tvm import relay
-from tvm.tir.tensor_intrin.hexagon import VMEM_COPY_STRIDED_DST_32_INTRIN_MAN, VMEM_COPY_STRIDED_SRC_32_INTRIN_MAN
+from tvm.tir.tensor_intrin.hexagon import (
+    VMEM_COPY_STRIDED_DST_32_INTRIN_MAN,
+    VMEM_COPY_STRIDED_SRC_32_INTRIN_MAN,
+    VMEM_COPY_STRIDED_DST_8x8x32_INTRIN_MAN
+)
 
 hex_target = tvm.target.hexagon("v68")
 TARGET_HEX = tvm.target.Target(hex_target, host=hex_target)
@@ -134,6 +138,41 @@ def test_transform_from_croutonized(hexagon_session, shape, layout):
     sch.tensorize(w_2, VMEM_COPY_STRIDED_DST_32_INTRIN_MAN)
 
     sch.parallel(sch.fuse(n, h, w_1))
+
+    # Build
+    dev_lib = tvm.build(sch.mod["main"], target=TARGET_HEX, name="main")
+    dev_rt_mod = hexagon_session.load_module(dev_lib)
+    dev_rt_mod(*dev_input)
+
+    assert np.array_equal(dev_input[1].numpy(), ref_transform_from(np_input[0], layout))
+
+    if BENCHMARK_TIME:
+        timer = dev_rt_mod.time_evaluator("__tvm_main__", hexagon_session.device, number=100, repeat=1)
+        dur_sec = timer(*dev_input).mean
+        print(f"{dur_sec*1000:0.3f} ms")
+
+
+@tvm.testing.requires_hexagon
+def test_transform_from_croutonized_blocked(hexagon_session, shape, layout):
+    np.random.seed(100)
+
+    func = relay_layout_transform_from(shape, src_layout=layout, dst_layout="NHWC")
+
+    args_info = ms.arg_info.ArgInfo.from_prim_func(func)
+    np_input = [np.random.default_rng().integers(0, 37, list(int(d) for d in info.shape), dtype="uint8") for info in args_info]
+    dev_input = [tvm.runtime.ndarray.array(arr, device=hexagon_session.device, mem_scope="global") for arr in np_input]
+
+    sch = tvm.tir.Schedule(func)
+    b1 = sch.get_block(name="T_layout_trans", func_name="main")
+    n, h, w, c = sch.get_loops(block=b1)
+
+    c_1, c_2 = sch.split(loop=c, factors=[None, 32])
+    w_1, w_2 = sch.split(loop=w, factors=[None, 8])
+    h_1, h_2 = sch.split(loop=h, factors=[None, 8])
+    sch.reorder(h_1, w_1, c_1, h_2, w_2, c_2)
+    sch.tensorize(h_2, VMEM_COPY_STRIDED_DST_8x8x32_INTRIN_MAN)
+
+    sch.parallel(sch.fuse(n, h_1, w_1))
 
     # Build
     dev_lib = tvm.build(sch.mod["main"], target=TARGET_HEX, name="main")

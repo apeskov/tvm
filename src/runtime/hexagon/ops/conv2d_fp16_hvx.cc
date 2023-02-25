@@ -84,10 +84,10 @@ extern "C" void HexagonCopyStridedSrc(uint8_t* src, uint8_t* dst, int32_t src_st
 
 
 
-extern "C" void HexagonCopyStridedDst(uint8_t* src, uint8_t* dst, int32_t dst_stride) {
+extern "C" void HexagonCopyStridedDst_vmemu(uint8_t* src, uint8_t* dst, int32_t dst_stride) {
   asm volatile(
       "{                            \n\t"
-      "    v4 = vmemu(%0)           \n\t"
+      "    v4 = vmem(%0)            \n\t"
       "    r7 = %1                  \n\t"
       "    r6 = #32                 \n\t"
       "}                            \n\t"
@@ -147,6 +147,125 @@ extern "C" void HexagonCopyStridedDst(uint8_t* src, uint8_t* dst, int32_t dst_st
       :
       : "r"(src), "r"(dst), "r"(dst_stride)
       : "r7", "r6", "v0", "v1", "v2", "v3", "v4", "v6", "v7", "memory");
+}
+
+extern "C" void HexagonCopyStridedDst_asm(uint8_t* src, uint8_t* dst, int32_t dst_stride) {
+  asm volatile(
+      "{                            \n\t"
+      "    v4 = vmem(%0)            \n\t"
+      "    r6 = and(%1, #96)        \n\t"  // begin of mask
+      "    r7 = add(%1, #32)        \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    q0 = vsetq(r6)           \n\t"
+      "    r9 = neg(r6)             \n\t"  // initial shift of data
+      "    r7 = and(r7, #96)        \n\t"  // end of mask
+      "}                            \n\t"
+      "{                            \n\t"
+      "    q1 = vsetq2(r7)          \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    r8 = #32                 \n\t"  // rotation step
+      "    v4 = vror(v4, r9)        \n\t"
+      "    q0 = xor(q0, q1)         \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "    v4 = vror(v4, r8)        \n\t"
+      "    if (q0) vmem(%1) = v4    \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "    v4 = vror(v4, r8)        \n\t"
+      "    if (q0) vmem(%1) = v4    \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    %1 = add(%1, %2)         \n\t"
+      "    v4 = vror(v4, r8)        \n\t"
+      "    if (q0) vmem(%1) = v4    \n\t"
+      "}                            \n\t"
+      "{                            \n\t"
+      "    if (q0) vmem(%1) = v4    \n\t"
+      "}                            \n\t"
+      :
+      : "r"(src), "r"(dst), "r"(dst_stride)
+      : "r7", "r6", "r8", "r9", "v4", "q1", "q0", "memory");
+}
+
+extern "C" void HexagonCopyStridedDst(uint8_t* src, uint8_t* dst,
+                                              int32_t dst_stride) {
+  // ror  = i*(1-str) - dst
+  // mask = i*str + dst
+  // Addressing of data by chunk of 32 byte
+  HVX_Vector data = *(HVX_Vector *) (src); // assume that is aligned load
+  int mask_start = (int)dst & 96;
+  int mask_step = (int)dst_stride;
+  int rotation_start = -mask_start;
+  int rotation_step = (32 - (int)dst_stride);
+
+  auto mask0 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask1 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask2 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask3 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+
+  data = Q6_V_vror_VR(data, rotation_start);
+
+  Q6_vmaskedstoreq_QAV(mask0, dst, data);
+  data = Q6_V_vror_VR(data, rotation_step);
+  dst += dst_stride;
+  Q6_vmaskedstoreq_QAV(mask1, dst, data);
+  data = Q6_V_vror_VR(data, rotation_step);
+  dst += dst_stride;
+  Q6_vmaskedstoreq_QAV(mask2, dst, data);
+  data = Q6_V_vror_VR(data, rotation_step);
+  dst += dst_stride;
+  Q6_vmaskedstoreq_QAV(mask3, dst, data);
+}
+
+extern "C" void HexagonCroutonBlock_8x8x32_intin(uint8_t* src, uint8_t* dst,
+                                                 int32_t dst_w_stride, int32_t dst_h_stride ) {
+  int mask_start = (int)dst & 96;
+  int mask_step = (int)dst_w_stride;
+  int rotation_start = -mask_start;
+  int rotation_step = (32 - (int)dst_w_stride);
+
+  auto mask0 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask1 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask2 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+  mask_start = (mask_start + mask_step) & 96;
+  auto mask3 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+
+  for (int h = 0; h < 8; h++) {
+    HVX_Vector data = *(HVX_Vector*)(src);
+    data = Q6_V_vror_VR(data, rotation_start);
+
+    Q6_vmaskedstoreq_QAV(mask0, dst + 0 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask1, dst + 1 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask2, dst + 2 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask3, dst + 3 * dst_w_stride, data);
+    src += 128;
+
+    data = *(HVX_Vector*)(src);
+    data = Q6_V_vror_VR(data, rotation_start);
+
+    Q6_vmaskedstoreq_QAV(mask0, dst + 4 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask1, dst + 5 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask2, dst + 6 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask3, dst + 7 * dst_w_stride, data);
+    src += 128;
+    dst += dst_h_stride;
+  }
 }
 
 namespace tvm {

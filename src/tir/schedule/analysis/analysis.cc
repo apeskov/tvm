@@ -18,6 +18,7 @@
  */
 #include "../ir_comparator.h"
 #include "../utils.h"
+#include <tvm/relay/base.h>
 
 namespace tvm {
 namespace tir {
@@ -1437,7 +1438,7 @@ bool NeedsMultiLevelTiling(const ScheduleState& self, const StmtSRef& block_sref
     return false;
   }
   const BlockNode* block = TVM_SREF_TO_BLOCK(block_sref);
-  if (block->writes.size() != 1 || block->reads.empty() || IsSpatial(block_sref) ||
+  if (block->writes.size() != 1 || block->reads.empty() || // IsSpatial(block_sref) ||
       !IsTrivialBinding(self, block_sref)) {
     return false;
   }
@@ -1490,7 +1491,7 @@ bool NeedsMultiLevelTiling(const ScheduleState& self, const StmtSRef& block_sref
     }
     total_unused_block_vars += n_unused_block_vars;
   }
-  return total_unused_block_vars >= 1;
+  return total_unused_block_vars >= 0;
 }
 
 bool IsSpatialPrimFunc(const PrimFunc& func) {

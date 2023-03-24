@@ -226,7 +226,7 @@ extern "C" void HexagonCopyStridedDst(uint8_t* src, uint8_t* dst,
 }
 
 extern "C" void HexagonCroutonBlock_8x8x32_intin(uint8_t* src, uint8_t* dst,
-                                                 int32_t dst_w_stride, int32_t dst_h_stride ) {
+                                                 int32_t dst_w_stride, int32_t dst_h_stride) {
   int mask_start = (int)dst & 96;
   int mask_step = (int)dst_w_stride;
   int rotation_start = -mask_start;
@@ -239,6 +239,58 @@ extern "C" void HexagonCroutonBlock_8x8x32_intin(uint8_t* src, uint8_t* dst,
   auto mask2 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
   mask_start = (mask_start + mask_step) & 96;
   auto mask3 = Q6_Q_xor_QQ(Q6_Q_vsetq_R(mask_start), Q6_Q_vsetq2_R((mask_start + 32) & 96));
+
+  for (int h = 0; h < 8; h++) {
+    HVX_Vector data = *(HVX_Vector*)(src);
+    data = Q6_V_vror_VR(data, rotation_start);
+
+    Q6_vmaskedstoreq_QAV(mask0, dst + 0 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask1, dst + 1 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask2, dst + 2 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask3, dst + 3 * dst_w_stride, data);
+    src += 128;
+
+    data = *(HVX_Vector*)(src);
+    data = Q6_V_vror_VR(data, rotation_start);
+
+    Q6_vmaskedstoreq_QAV(mask0, dst + 4 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask1, dst + 5 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask2, dst + 6 * dst_w_stride, data);
+    data = Q6_V_vror_VR(data, rotation_step);
+    Q6_vmaskedstoreq_QAV(mask3, dst + 7 * dst_w_stride, data);
+    src += 128;
+    dst += dst_h_stride;
+  }
+}
+
+/** Works incorrect for come cases */
+extern "C" void HexagonCroutonBlock_8x8x32_intin_2(uint8_t* src, uint8_t* dst,
+                                                   int32_t dst_w_stride, int32_t dst_h_stride) {
+  int mask_start = (int)dst & 96;
+  int mask_step = (int)dst_w_stride;
+  int rotation_start = -mask_start;
+  int rotation_step = (32 - (int)dst_w_stride);
+
+  HVX_Vector zero = Q6_V_vsplat_R(0x00000000);
+  HVX_Vector one = Q6_V_vsplat_R(0xFFFFFFFF);
+
+  HVX_Vector res1 = Q6_V_vlalign_VVR(one, zero, mask_start);
+  HVX_Vector res2 = Q6_V_vlalign_VVR(one, zero, mask_start + 32);
+  HVX_Vector mask = Q6_V_vxor_VV(res1, res2);
+
+  HVX_VectorPred mask0 = Q6_Q_vand_VR(mask, 0xFFFFFFFF);
+  mask = Q6_V_vror_VR(mask, -mask_step);
+  HVX_VectorPred mask1 = Q6_Q_vand_VR(mask, 0xFFFFFFFF);
+  mask = Q6_V_vror_VR(mask, -mask_step);
+  HVX_VectorPred mask2 = Q6_Q_vand_VR(mask, 0xFFFFFFFF);
+  mask = Q6_V_vror_VR(mask, -mask_step);
+  HVX_VectorPred mask3 = Q6_Q_vand_VR(mask, 0xFFFFFFFF);
+  mask = Q6_V_vror_VR(mask, -mask_step);
 
   for (int h = 0; h < 8; h++) {
     HVX_Vector data = *(HVX_Vector*)(src);

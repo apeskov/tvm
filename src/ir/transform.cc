@@ -473,6 +473,8 @@ Pass GetPass(const String& pass_name) {
 // a Sequential without the consideration of their orders. The phase
 // ordering problem needs to be handled in the future.
 IRModule SequentialNode::operator()(IRModule mod, const PassContext& pass_ctx) const {
+
+  auto callback = runtime::Registry::Get("blabla.callback");
   for (const Pass& pass : passes) {
     VLOG(0) << "Running pass " << pass->Info()->name;
     ICHECK(pass.defined()) << "Found undefined pass for optimization.";
@@ -516,10 +518,12 @@ IRModule SequentialNode::operator()(IRModule mod, const PassContext& pass_ctx) c
       // mod = trace->Add(knob, "enabled");
       // instead of the two lines below.
       mod = pass(std::move(mod), pass_ctx);
+      (*callback)(mod, pass->Info()->name);
       trace->SetOutMod(mod);
 
     } else {
       mod = pass(std::move(mod), pass_ctx);
+      (*callback)(mod, pass->Info()->name);
     }
   }
   return mod;

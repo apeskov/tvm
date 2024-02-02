@@ -1039,6 +1039,12 @@ class PipelineInjector : private StmtExprMutator {
       const Array<Block>& dsts = pair.second;
       for (const Block& dst : dsts) {
         const auto& dst_info = pipeline_info.at(dst);
+        if (src_info.stage > dst_info.stage) {
+          std::cout << "Identical: " << (src == dst ? "Yes" : "NO") << std::endl
+                    << " src_info.stage = " << src_info.stage << std::endl
+                    << " dst_info.stage = " << dst_info.stage << std::endl;
+        }
+
         CHECK_LE(src_info.stage, dst_info.stage)
             << "ValueError: statement " << dst << " in stage " << dst_info.stage
             << " cannot depends on statement " << src << " in a later stage " << src_info.stage;
@@ -1106,6 +1112,9 @@ class PipelineInjector : private StmtExprMutator {
         f_add_child(pipeline_body_seq->seq[i]);
       }
     }
+    // for (auto &b : original_order) {
+    //   std::cout << "[XXX] " << b << std::endl;
+    // }
 
     auto pipeline_stages =
         Downcast<Array<Integer>>(op->annotations.at(attr::software_pipeline_stage));

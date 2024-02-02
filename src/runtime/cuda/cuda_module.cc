@@ -51,6 +51,11 @@ class CUDAModuleNode : public runtime::ModuleNode {
                           std::unordered_map<std::string, FunctionInfo> fmap,
                           std::string cuda_source)
       : data_(data), fmt_(fmt), fmap_(fmap), cuda_source_(cuda_source) {
+    // std::cout << "CUDAModuleNode +++" << std::endl
+    //           << "[---] data:" << std::endl << data << std::endl
+    //           << "[---] cuda_source:" << std::endl << cuda_source << std::endl
+    //           << std::endl;
+
     std::fill(module_.begin(), module_.end(), nullptr);
   }
   // destructor

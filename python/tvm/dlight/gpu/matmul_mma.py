@@ -91,14 +91,20 @@ class MatmulTensorizationMMA(ScheduleRule):
         )
 
         # tile size
-        block_m, block_n, block_k = 128, 128, 32
+        # block_m, block_n, block_k = 128, 128, 32
+        block_m, block_n, block_k = 256, 128, 32
+        # block_m, block_n, block_k = 128, 128, 64  # [AP_73]
+        # block_m, block_n, block_k = 128, 256, 64  # [AP_81]
+        # block_m, block_n, block_k = 256, 128, 64  # [AP_85] # [AP_86]
 
         # tensor core intrinsic size
         micro_size_m, micro_size_n, micro_size_k = 16, 16, 16
 
         # thread size
         # thread_x == warp_size
-        thread_z, thread_y, thread_x = 2, 2, 32
+        thread_z, thread_y, thread_x = 4, 2, 32
+        # thread_z, thread_y, thread_x = 2, 4, 32 # [AP_81] [AP_85]
+        # thread_z, thread_y, thread_x = 4, 2, 32 # [AP_86]
 
         vector_size = 8
         unroll_depth = 4
@@ -159,8 +165,9 @@ class MatmulTensorizationMMA(ScheduleRule):
         k0, k1 = sch.split(k, factors=k_factors)
 
         sch.reorder(i0, j0, i1, j1, k0, i2, j2, k1, i3, j3)
-
         block_axis = sch.fuse(batch, i0, j0, i1, j1)
+        # sch.reorder(i0, j0, j1, i1, k0, i2, j2, k1, i3, j3)
+        # block_axis = sch.fuse(batch, i0, j0, j1, i1)
         sch.bind(block_axis, "blockIdx.x")
 
         sch.bind(i2, "threadIdx.z")
@@ -185,14 +192,28 @@ class MatmulTensorizationMMA(ScheduleRule):
 
             # bind loops
             fused = sch.fuse(*sch.get_loops(block_read_smem)[-2:])
+            # TBD
+            # if use_permutation:
+            #     fused = sch.fuse(*sch.get_loops(block_read_smem)[-2:])
+            # else:
+            #     lm, lk = sch.get_loops(block_read_smem)[-2:]
+            #     lm_0, lm_1 = sch.split(lm, [None, 16])
+            #     lk_0, lk_1 = sch.split(lk, [None, 16])
+            #     sch.reorder(lm_0, lk_0, lm_1, lk_1)
+            #     fused = sch.fuse(lm_0, lk_0, lm_1, lk_1)
+            # TBD
             f0, f1, f2, f3, f4 = sch.split(fused, [None, thread_z, thread_y, thread_x, vector_size])
+            # f3_0, f0, f1, f2, f3_1, f4 = sch.split(fused, [thread_x // 8, None, thread_z, thread_y, 8, vector_size])
+            # sch.reorder(f0, f1, f2, f3_0, f3_1, f4)
             sch.bind(f1, "threadIdx.z")
             sch.bind(f2, "threadIdx.y")
+            # sch.bind(sch.fuse(f3_0, f3_1), "threadIdx.x")
             sch.bind(f3, "threadIdx.x")
             sch.vectorize(f4)
 
             # swizzling
             sch.annotate(block_read_smem, ann_key="permuted_layout", ann_val=1)
+            # sch.storage_align(block=block_read_smem, buffer_index=0, axis=-2, factor=64, offset=16)
 
             # 2) Read to register
             block_read_reg = sch.cache_read(block_outer, read_buffer_idx, "warp")
@@ -208,6 +229,19 @@ class MatmulTensorizationMMA(ScheduleRule):
             v00, v01 = sch.split(sch.get_loops(block_read_reg)[-2], [None, micro_size_1])
             v10, v11 = sch.split(sch.get_loops(block_read_reg)[-1], [None, micro_size_2])
             sch.reorder(v00, v10, v01, v11)
+
+            # if not use_permutation:
+            #     sch.transform_layout(
+            #         block_read_smem,
+            #         ("write", 0),
+            #         lambda v0, v1, v2: (
+            #             v0,
+            #             v1 // micro_size_1,
+            #             v2 // micro_size_2,
+            #             v1 % micro_size_1,
+            #             v2 % micro_size_2,
+            #         ),
+            #     )
 
             # reorder read axis to match the layout of ldmatrix
             sch.transform_layout(
@@ -305,9 +339,20 @@ class MatmulTensorizationMMA(ScheduleRule):
         sch.tensorize(sch.get_loops(block_write_reg)[-2], intrin_group["store"])
 
         # Step 6. Async pipeline
-        sch.annotate(k0, ann_key="software_pipeline_stage", ann_val=[0, 0, 3])
+        sch.annotate(k0, ann_key="software_pipeline_stage", ann_val=[0, 0, 1])
+        # sch.annotate(k0, ann_key="software_pipeline_stage", ann_val=[0, 0, 1])  # [AP_81] [AP_85]  async depth 2 is also OK
         sch.annotate(k0, ann_key="software_pipeline_order", ann_val=[0, 1, 2])
         sch.annotate(k0, ann_key="software_pipeline_async_stages", ann_val=[0])
+
+        # [AP] Double soft pipeline. Ver 2. Experiment
+        # no HMMA before hot loop
+        # sch.annotate(k0, ann_key="software_pipeline_stage", ann_val=[0, 0, 1, 2, 2])    # [ copy_a(+2), copy_b(+2), epilog_load_ab(+1), loop(), prolog_compute() ]
+        # # sch.annotate(k0, ann_key="software_pipeline_order", ann_val=[0, 1, 3, 2, 4])  # [ copy_a(+2), copy_b(+2), loop(), epilog_load_ab(+1),  prolog_compute() ]
+        # sch.annotate(k0, ann_key="software_pipeline_order", ann_val=[1, 2, 3, 0, 4])    # [ copy_a(+2), copy_b(+2), loop(), epilog_load_ab(+1),  prolog_compute() ]
+        # sch.annotate(k0, ann_key="software_pipeline_async_stages", ann_val=[0])
+
+        # sch.annotate(k1, ann_key="software_pipeline_stage", ann_val=[0, 0, 1])
+        # sch.annotate(k1, ann_key="software_pipeline_order", ann_val=[0, 1, 2])
 
         # Step 7. Handle dequantize block
         # Now we just add a dummy kernel to compute dequantize

@@ -64,7 +64,38 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     PrimExpr col_idx_outer = floordiv(col_idx, VECTORIZE_FACTOR),
              col_idx_inner = floormod(col_idx, VECTORIZE_FACTOR);
     PrimExpr new_col_idx_outer;
-    if (row_size % 64 == 0) {
+    static bool USE_ROT_SHIFT = false;
+    if (row_size % 64 == 0 and USE_ROT_SHIFT) {
+      std::cout << "[XXX] ROT_SHUFT layout 64" << std::endl;
+      // Use 8 * 8 permuted layout
+      // Every number below corresponds to 8 consecutive fp16 number in shared mem, i.e. one read
+      // Every row below corresponds to 32 banks
+      // 0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
+      // 0  1  2  3  4  5  6  7    ==>    7  0  1  2  3  4  5  6
+      // 0  1  2  3  4  5  6  7    ==>    6  7  0  1  2  3  4  5 
+      // 0  1  2  3  4  5  6  7    ==>    5  6  7  0  1  2  3  4
+      // 0  1  2  3  4  5  6  7    ==>    4  5  6  7  0  1  2  3  
+      // 0  1  2  3  4  5  6  7    ==>    3  4  5  6  7  0  1  2  
+      // 0  1  2  3  4  5  6  7    ==>    2  3  4  5  6  7  0  1 
+      // 0  1  2  3  4  5  6  7    ==>    1  2  3  4  5  6  7  0 
+
+      // auto row_idx_sub = floormod(row_idx, 8);
+
+      // rottary layout
+      // new_col_idx_outer = floordiv(col_idx_outer, 8) * 8 + floormod(col_idx_outer + row_idx_sub, 8);
+      // new_col_idx_outer = floordiv(col_idx_outer, 8) * 8 + floormod(col_idx_outer + 1, 8);
+      
+      // plain
+      // new_col_idx_outer = col_idx_outer;
+
+      // permuted
+      // new_col_idx_outer = col_idx_outer ^ row_idx_sub;
+
+      auto row_idx_sub = floormod(floordiv(row_idx, 4), 2);
+      new_col_idx_outer = col_idx_outer ^ row_idx_sub;
+
+    } else if (row_size % 64 == 0) {
+      std::cout << "[XXX] Permute Layout 64" << std::endl;
       // Use 8 * 8 permuted layout
       // Every number below corresponds to 8 consecutive fp16 number in shared mem, i.e. one read
       // Every row below corresponds to 32 banks
@@ -78,7 +109,8 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
       // 0  1  2  3  4  5  6  7    ==>    7  6  5  4  3  2  1  0
       auto row_idx_sub = floormod(row_idx, 8);
       new_col_idx_outer = col_idx_outer ^ row_idx_sub;
-    } else {
+    } else if (row_size % 32 == 0) {
+      std::cout << "[XXX] PermuteIndices 32" << std::endl;
       ICHECK(row_size % 32 == 0);
       // Use 8 * 4 permuted layout
       // Every number below corresponds to 8 consecutive fp16 number in shared mem, i.e. one read
@@ -92,12 +124,24 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
       // 0  1  2  3    ==>    3  2  1  0
       // 0  1  2  3    ==>    3  2  1  0
       // View with 8 elements per row:
-      // 0  1  2  3  4  0  1  2  3    ==>    0  1  2  3  0  1  2  3
-      // 0  1  2  3  4  0  1  2  3    ==>    1  0  3  2  1  0  3  2
-      // 0  1  2  3  4  0  1  2  3    ==>    2  3  0  1  2  3  0  1
-      // 0  1  2  3  4  0  1  2  3    ==>    3  2  1  0  3  2  1  0
+      // 0  1  2  3  0  1  2  3    ==>    0  1  2  3  0  1  2  3
+      // 0  1  2  3  0  1  2  3    ==>    1  0  3  2  1  0  3  2
+      // 0  1  2  3  0  1  2  3    ==>    2  3  0  1  2  3  0  1
+      // 0  1  2  3  0  1  2  3    ==>    3  2  1  0  3  2  1  0
       auto row_idx_sub = floormod(row_idx, 8);
       new_col_idx_outer = col_idx_outer ^ floordiv(row_idx_sub, 2);
+    } else {
+      std::cout << "[XXX] PermuteIndices 16" << std::endl;
+      // 0  1  ==>  0  1
+      // 0  1  ==>  0  1
+      // 0  1  ==>  0  1
+      // 0  1  ==>  0  1
+      // 0  1  ==>  1  0
+      // 0  1  ==>  1  0
+      // 0  1  ==>  1  0
+      // 0  1  ==>  1  0
+      auto row_idx_sub = floormod(row_idx, 8);
+      new_col_idx_outer = floormod(col_idx_outer + floordiv(row_idx_sub, 4), 2);  // 0 or 1, 0 - no swap, 1 - swap
     }
     return {row_idx, analyzer_->Simplify(new_col_idx_outer * 8 + col_idx_inner)};
   }
@@ -150,7 +194,8 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     auto buffer_col_size = buffer->shape[dim - 2].as<IntImmNode>()->value;
 
     if (buffer_row_size % 64 != 0) {
-      CHECK(buffer_row_size % 32 == 0)
+      // CHECK(buffer_row_size % 32 == 0)
+      CHECK(buffer_row_size % 16 == 0)
           << "Permuted Layout for Buffer \"" << buffer->name << "\" with shape " << buffer->shape
           << " is not supported since its second dimension is not divisible by 32";
       CHECK(buffer_col_size % 2 == 0)

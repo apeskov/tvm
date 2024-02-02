@@ -408,6 +408,12 @@ class BindVarBoundInfo : public StmtVisitor {
     StmtVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const LetStmtNode* op) {
+    auto int_set = analyzer_->int_set(op->value);    
+    analyzer_->Bind(op->var, op->value);
+    StmtVisitor::VisitStmt_(op);
+  }
+
  protected:
   // internal analyzer.
   arith::Analyzer* analyzer_;

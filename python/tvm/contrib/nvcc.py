@@ -98,6 +98,8 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     elif isinstance(arch, str):
         cmd += ["-arch", arch]
 
+    cmd += ["--maxrregcount", "230"]
+
     if options:
         if isinstance(options, str):
             cmd += [options]

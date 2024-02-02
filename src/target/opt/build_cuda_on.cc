@@ -167,6 +167,7 @@ runtime::Module BuildCUDA(IRModule mod, Target target) {
   }
   const auto* f_exit = Registry::Get("target.TargetExitScope");
   (*f_exit)(target);
+  // std::cout << "[XXX] " << fmt << std::endl;
   return CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
 }
 

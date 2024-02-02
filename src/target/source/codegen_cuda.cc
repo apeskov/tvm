@@ -145,11 +145,15 @@ std::string CodeGenCUDA::Finish() {
     decl_stream << "__forceinline__ __device__ unsigned int\n";
     decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
     decl_stream << "{\n";
+    decl_stream << "#if (! defined (__clang__) && defined(__CUDA_ARCH__) && __CUDACC_VER_MAJOR__ >= 11)\n";
+    decl_stream << "  return static_cast<unsigned>(__cvta_generic_to_shared(smem_ptr));\n";
+    decl_stream << "#else\n";
     decl_stream << "  unsigned int smem_int;\n";
     decl_stream << "  asm volatile (\"{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
                    "cvt.u32.u64 %0, smem_int; }\"\n";
     decl_stream << "    : \"=r\"(smem_int) : \"l\"(smem_ptr));\n";
     decl_stream << "  return smem_int;\n";
+    decl_stream << "#endif\n";
     decl_stream << "}\n";
   }
 

@@ -674,8 +674,10 @@ std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
       #else
         " @p cp.async.{cg_or_ca}.shared.global [%1], [%2], %3;"
       #endif
-      "  @!p {store_shared};}"
-        :: "r"(pred_guard), "r"(addr), "l"((void*)({global_ptr})), "n"({bytes}), {nopreg}
+      // "  @!p {store_shared};}"
+        // :: "r"(pred_guard), "r"(addr), "l"((void*)({global_ptr})), "n"({bytes}), {nopreg}
+        "}"
+        :: "r"(pred_guard), "r"(addr), "l"((void*)({global_ptr})), "n"({bytes})
     );
   }
 )";
@@ -702,8 +704,10 @@ std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
   replacer.register_rule("{global_ptr}", global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
-  replacer.register_rule("{store_shared}", store_shared);
-  replacer.register_rule("{nopreg}", nopreg);
+  // TO COMMENT +++
+  // replacer.register_rule("{store_shared}", store_shared);
+  // replacer.register_rule("{nopreg}", nopreg);
+  // TO COMMENT ---
   replacer.register_rule("{pred_guard}", predicate_value);
   predicated_asm_code = replacer.rewrite(predicated_asm_code);
   return predicated_asm_code;
